@@ -18,7 +18,8 @@ import scipy.linalg as splin
 import gc
 import gzip
 from sklearn import covariance
-
+from bgen_reader import read_bgen
+import h5py
 
 ##############FUNCTIONS##############
 
@@ -137,6 +138,79 @@ def make_phepos_dict(POS_fh, CHROM):
                 pos_dict[line[0]] = np.float64(pos_array)
     return pos_dict
 
+def get_genotype_data_bgen(bgen_loc):
+    # read the bgen file using bgen_reader
+    bgen = read_bgen(bgen_loc, verbose=False)
+    # the bed will be empty
+    bed=None
+    # fake the fam to be like plink format
+    fam = bgen['samples']
+    fam = fam.to_frame("iid")
+    fam.set_index('iid',inplace=True)
+    fam.index = fam.index.astype(str)
+    # fake the bim to be like plink format
+    bim = bgen['variants'].compute()
+    bim = bim.assign(i = range(bim.shape[0]))
+    bim['id'] = bim['rsid']
+    bim = bim.rename(index = str, columns = {"id": "snp"})
+    bim['a1'] = bim['allele_ids'].str.split(",", expand=True)[0]
+    bim.index = bim["snp"].astype(str).values
+    bim.index.name = "candidate"
+        
+    ##Fix chromosome ids
+    #bim['chrom'].replace('^chr','',regex = True,inplace = True)
+    bim['chrom'] = bim['chrom'].replace('^chr', '', regex=True)
+    #bim['chrom'].replace(['X', 'Y', 'XY', 'MT'], ['23', '24', '25', '26'],inplace=True)
+    bim['chrom'] = bim['chrom'].replace(['X', 'Y', 'XY', 'MT'], ['23', '24', '25', '26'])
+    ##Remove non-biallelic & non-ploidy 2 (to be sure). (These can't happen in binary plink files).
+    print("Warning, the current software only supports biallelic SNPs and ploidy 2")
+    bim = bim.loc[np.logical_and(bim['nalleles'] < 3,bim['nalleles'] > 0),:]
+
+    # return the variables
+    return bim,fam,bed,bgen
+
+def bgen_to_positions_and_genotypes(bim, fam, bgen, CHROM, minimumProbabilityStep=0.1, genpos_dict=None):
+    # create dictionary of chromosomal positions as keys and the genotypes for that variant as a numpy array
+    gen_dict = {}
+    # get the SNP indices from the bim
+    snp_idxs = bim['i'].values
+    # get the SNP identifiers
+    snp_names = bim.rsid.tolist()
+    # get the chromosomal locations
+    chrom_locs = bim.pos.tolist()
+    # get the chromosomes present
+    snp_chromosomes = bim.chrom.tolist()
+    # subset to the variant indices that are of the chromosome we are looking at
+    snp_idxs = [snp_idxs[i] for i, x in enumerate(snp_chromosomes) if x == CHROM]
+    snp_names = [snp_names[i] for i, x in enumerate(snp_chromosomes) if x == CHROM]
+    # and the variants that are our search space
+    if genpos_dict is not None:
+        #snp_idxs = snp_idxs[x for x in snp_names if x in genpos_dict.keys()]
+        snp_idxs = [snp_idxs[i] for i, x in enumerate(snp_names) if x in genpos_dict.keys()]
+    # check each snp index
+    for snpId in snp_idxs :
+        # get the genotype
+        geno = bgen["genotype"][snpId].compute()
+        if (all(geno["ploidy"]==2)) :
+            # initialize the dosage
+            snp_df_dosage_t = None
+            # depending on the phasing we might do slightly different things
+            if(geno["phased"]):
+                snp_df_dosage_t = geno["probs"][:,[0,2]].sum(1).astype(float)
+                naId = (np.amax(geno["probs"][:,:2],1)+np.amax(geno["probs"][:,2:4],1))<(1+minimumProbabilityStep)
+                snp_df_dosage_t[naId] = -1
+            else :
+                snp_df_dosage_t = ((geno["probs"][:,0]* 2)+geno["probs"][:,1]).astype(float)
+                naId = np.amax(geno["probs"][:,:3],1)<((1/3)+minimumProbabilityStep)
+                snp_df_dosage_t[naId] = -1
+            # convert to float values
+            snp_df_dosage_t = np.float64(snp_df_dosage_t)
+            # set the variants we had marked as -1, so the unknown ones, to be the mean of the variants that we do know the values of
+            snp_df_dosage_t[snp_df_dosage_t == -1] = np.mean(snp_df_dosage_t[snp_df_dosage_t != -1])
+            # finally put in the dictionary for each variant position as key, the genotypes for that variant
+            gen_dict[chrom_locs[snpId]] = snp_df_dosage_t
+    return gen_dict
+    
 def make_gen_dict(GEN_fh, pos_dict, sample_ids=None):
     """
     Read genotype matrix from MatrixEQTL and create a dictionary.
@@ -150,7 +224,7 @@ def make_gen_dict(GEN_fh, pos_dict, sample_ids=None):
     dict: Dictionary with SNP positions as keys and genotypes as values.
     """
     
-    # create dictionary of variants as keys and the alleles for that variant as a numpy array
+    # create dictionary of chromosomal positions as keys and the genotypes for that variant as a numpy array
     gen_dict = {}
     # read using the supplied file handle
     with open_file(GEN_fh) as GEN:
@@ -180,7 +254,7 @@ def make_gen_dict(GEN_fh, pos_dict, sample_ids=None):
             gen_dict[snp] = genos
     return gen_dict  # pos->genotypes
 
-def make_test_dict(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist, pvalue_column=None):
+def make_test_dict(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist=None, pvalue_column=None):
     """
     Create a dictionary of SNP-gene tests from a QTL file and return the file header.
     
@@ -189,7 +263,7 @@ def make_test_dict(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist, pvalue_
     gen_dict (dict): Dictionary with SNP positions as keys and genotypes as values.
     genpos_dict (dict): Dictionary with SNP IDs as keys and their positions as values.
     phepos_dict (dict): Dictionary with phenotype IDs as keys and their start and end positions as values.
-    cis_dist (float): Maximum distance for SNPs to be considered in cis with the phenotype.
+    cis_dist (float): Maximum distance for SNPs to be considered in cis with the phenotype. If none is applied, all SNP-gene pairs in the summary stats will be considered.
     pvalue_column (str, optional): Name of the column containing p-values. If not provided, the function will search for common p-value column names.
 
     Returns:
@@ -245,8 +319,8 @@ def make_test_dict(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist, pvalue_
                 phepos = phepos_dict[gene]
                 # check the absolute distance of the variant to the flanks of the phenotype, and take the closest, so the smallest value
                 distance = min(abs(phepos - snp))
-                # check if this distance is within the cis window
-                if distance <= cis_dist:
+                # check if we are filtering by distance, and if this distance is within the cis window
+                if cis_dist is None or distance <= cis_dist:
                     # if it is within the cis window, extract the p-value for this variant-feature
                     pval = line[pvalIndex]
                     # convert to a float
@@ -270,16 +344,15 @@ def make_test_dict(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist, pvalue_
     # return the dictionary and the header of the file
     return test_dict, "\t".join(header)
 
-def make_test_dict_tensorqtl(QTL_fh, gen_dict, genpos_dict, cis_dist, group_size_s=None):
+def make_test_dict_tensorqtl(QTL_fh, genpos_dict, cis_dist=None, group_size_s=None):
     """
     Create a dictionary of SNP-gene tests from a tensorQTL file and return the file header.
     
     Parameters:
     QTL_fh (str or file-like object): Parquet file with variant-gene pair associations.
-    gen_dict (dict): Dictionary with SNP positions as keys and genotypes as values.
     genpos_dict (dict): Dictionary with SNP IDs as keys and their positions as values.
     phepos_dict (dict): Dictionary with phenotype IDs as keys and their start and end positions as values.
-    cis_dist (float): Maximum distance for SNPs to be considered in cis with the phenotype.
+    cis_dist (float): Maximum distance for SNPs to be considered in cis with the phenotype. If none is applied, all SNP-gene pairs in the summary stats will be considered.
     pvalue_column (str, optional): Name of the column containing p-values. If not provided, the function will search for common p-value column names.
 
     Returns:
@@ -289,7 +362,8 @@ def make_test_dict_tensorqtl(QTL_fh, gen_dict, genpos_dict, cis_dist, group_size
     # load the tensorQTL output
     qtl_df = load_tensorqtl_output(QTL_fh, group_size_s=group_size_s)
     # filter so that the variant-feature pairs are within the given cis distance
-    qtl_df = qtl_df[qtl_df['tss_distance'].abs()<=cis_dist]
+    if cis_dist is not None:
+        qtl_df = qtl_df[qtl_df['tss_distance'].abs()<=cis_dist]
     # group the results for each feature
     gdf = qtl_df.groupby('gene_id')
     
@@ -317,7 +391,7 @@ def make_test_dict_tensorqtl(QTL_fh, gen_dict, genpos_dict, cis_dist, group_size
     # return the dictionary and the header of the file
     return test_dict, '\t'.join(qtl_df.columns)
 
-def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist, pvalue_column=None):
+def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist=None, pvalue_column=None, variant_index_col=0, feature_index_col=1):
     """
     Create a dictionary of SNP-gene tests from a QTL file, assuming the genotype matrix and position file
     are separate from those used in the Matrix-eQTL run. This function is used with the external option
@@ -328,8 +402,10 @@ def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist
     gen_dict (dict): Dictionary with SNP positions as keys and genotypes as values.
     genpos_dict (dict): Dictionary with SNP IDs as keys and their positions as values.
     phepos_dict (dict): Dictionary with phenotype IDs as keys and their start and end positions as values.
-    cis_dist (float): Maximum distance for SNPs to be considered in cis with the phenotype.
+    cis_dist (float): Maximum distance for SNPs to be considered in cis with the phenotype. If none is applied, all snp-gene pairs in the summary stats will be considered.
     pvalue_column (str, optional): Name of the column containing p-values. If not provided, the function will search for common p-value column names.
+    variant_index_col (float, optional): Index of the column that contains the variant identifier (first column is the default). 
+    feature_index_col (float, optional): Index of the column that contains the feature identifier (second column is the default). 
 
     Returns:
     tuple: A dictionary with gene IDs as keys and a dictionary of test results as values, and the header of the QTL file.
@@ -373,19 +449,19 @@ def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist
         # split based on whitespace after removing the newline
         line = line.rstrip().split()
         # check if the first column, the variant, is in the dictionary of genomic positions
-        if line[0] in genpos_dict:
+        if line[variant_index_col] in genpos_dict:
             # get the position of the variant
-            snp = genpos_dict[line[0]]
+            snp = genpos_dict[line[variant_index_col]]
             # get the phenotype from the line, in the second column
-            gene = line[1]
+            gene = line[feature_index_col]
             # check if we have genotype data for this variant, and the position of this phenotype/gene/feature
             if snp in gen_dict and gene in phepos_dict:
                 # get the position of the feature
                 phepos = phepos_dict[gene]
                 # check the distance of the variant to the flanks of the feature, and take the smallest value
                 distance = min(abs(phepos - snp))
-                # if we are in cis distance
-                if distance <= cis_dist:
+                # check if we are subsetting based on cis distance, and if we are in cis distance
+                if cis_dist is not None and distance <= cis_dist:
                     # get the p-value for this variant and feature assocation
                     pval = line[pvalIndex]
                     # convert to float
@@ -417,6 +493,163 @@ def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist
         test_dict[gene]['snps'] = snps[is_in_cis_start | is_in_cis_end]
     return test_dict, "\t".join(header)
 
+def make_test_dict_limix(QTL_fh, cis_dist=None):
+    # for the limix output, the feature column is actually the first column
+    feature_index_col = 0
+    # and the variant is the second one
+    variant_index_col = 1
+    # and the p-value columns is this
+    pvalue_column = 'p_value'
+    # read the QTL filehandle that was supplied
+    QTL = open_file(QTL_fh)
+    # read the header of the file
+    header = QTL.readline().rstrip().split()
+    # check if the p value column was supplied
+    if pvalue_column is not None:
+        # and if it is actually present in the file
+        if  pvalue_column in header:
+            # get the index of that column
+            pvalIndex = header.index(pvalue_column)
+        # if not, then exit
+        else:
+            sys.exit(''.join(['Cannot find supplied p-value column in the tests file:', pvalue_column]))
+    # find the column with the p-value based on some possibilities
+    elif 'p-value' in header:
+        # get the index of that column
+        pvalIndex = header.index('p-value')
+    elif 'p.value' in header:
+        # get the index of that column
+        pvalIndex = header.index('p.value')
+    elif 'pvalue' in header:
+        # get the index of that column
+        pvalIndex = header.index('pvalue')
+    elif 'p_value' in header:
+        # get the index of that column
+        pvalIndex = header.index('p_value')
+    else:
+        sys.exit('Cannot find the p-value column in the tests file.')
+
+    # create a dictionary that has each feature/phenotype/gene as a key, as as the value another dictionary with:
+    # all the variants for this phenotype, 
+    # the variant with the lowest p-value, 
+    # the p-value of the variant with the lowest p-value, 
+    # and the line of the QTL output of the variant wih the lowest p-value
+    test_dict = {}
+    # we also need two other dictionaries
+    genpos_dict = {}
+    phepos_dict = {}
+
+    # get indices of each column
+    feature_id_index = header.index('feature_id')
+    snp_id_index = header.index('snp_id')
+    feature_chromosome_index = header.index('feature_chromosome')
+    feature_start_index = header.index('feature_start')
+    feature_end_index = header.index('feature_end')
+    snp_chromosome_index = header.index('snp_chromosome')
+    snp_position_index = header.index('snp_position')
+    
+    # check each line in the QTL output
+    for line in QTL:
+        # line looks like this: 
+        # feature_id,snp_id,p_value,beta,beta_se,empirical_feature_p_value,feature_chromosome,feature_start,feature_end,ENSG,biotype,n_samples,n_e_samples,snp_chromosome,snp_position,assessed_allele,call_rate,maf,hwe_p
+        # remove trailing newline, and split by whitespace
+        line = line.rstrip().split()
+        # grab the values
+        variant = line[snp_id_index]
+        feature = line[feature_id_index]
+        p_value = line[pvalIndex]
+        feature_pos = [line[feature_start_index], line[feature_end_index]]
+        var_pos = line[snp_position_index]
+        # put the variant position in the dictionary
+        genpos_dict[variant] = var_pos
+        # features positions too
+        phepos_dict[feature] = feature_pos
+        # check the absolute distance of the variant to the flanks of the phenotype, and take the closest, so the smallest value
+        distance = min(abs(feature_pos - var_pos))
+        # check if we are filtering by distance, and if this distance is within the cis window
+        if cis_dist is None or distance <= cis_dist:
+            # convert to a float
+            pval = float(p_value)
+            # check if this is the first time we encounter this gne
+            if gene not in test_dict:
+                # if so, add it to the dictionary
+                test_dict[gene] = {'snps' : [snp], 'best_snp' : var_pos, 'pval' : pval, 'line' : '\t'.join(line)}
+            else:
+                # if not, then check if the variant is more significant that the current best hit
+                if pval < test_dict[gene]['pval']:
+                    # if so, update the parameters describing the best hit
+                    test_dict[gene]['best_snp'] = var_pos
+                    test_dict[gene]['pval'] = pval
+                    test_dict[gene]['line'] = '\t'.join(line)
+                # and add the location of this variant to the list of variants tested for this feature
+                test_dict[gene]['snps'].append(var_pos)
+    QTL.close()
+    return genpos_dict, phepos_dict, test_dict, "\t".join(header)
+        
+        
+    
+
+def make_test_dict_limix_h5(QTL_h5_path, genpos_dict, phepos_dict, cis_dist=None):
+    # make filehandle to the h5
+    h5_fh = h5py.File(QTL_h5_path,'r')
+    # create a dictionary that has each feature/phenotype/gene as a key, as as the value another dictionary with:
+    # all the variants for this phenotype, 
+    # the variant with the lowest p-value, 
+    # the p-value of the variant with the lowest p-value, 
+    # and the line of the QTL output of the variant wih the lowest p-value
+    test_dict = {}
+    # check each feature
+    for feature in h5_fh.keys():
+        # get the variants
+        vars_feature = h5_fh[feature]['snp_id']
+        # and the p-values
+        ps_feature = h5_fh[feature]['p_value']
+        # extract the chromosomal positon of the phenotype
+        phepos = phepos_dict[feature]
+        # check each variant
+        for i in range(0, len(vars_feature)):
+            # get the position of the variant
+            genpos = genpos_dict[vars_feature[i].decode("utf-8")]
+            # if we do cis filtering, check cis distance
+            if cis_dist is not None:
+                # check the absolute distance of the variant to the flanks of the phenotype, and take the closest, so the smallest value
+                distance = min(abs(phepos - genpos))
+                # check if this distance is within the cis window
+                if distance <= cis_dist:
+                    # get the p value
+                    pval = float(ps_feature[i])
+                    # check if this was the first time we handled this feature
+                    if feature not in test_dict:
+                        # if so, add the entry
+                        test_dict[feature] = {'snps' : [genpos], 'best_snp' : genpos, 'pval' : pval, 'line' : '\t'.join([feature, str(phepos[0]), str(phepos[1])])}
+                    else:
+                        
+                        # otherwise, check if this variant was more significant than the current most significant p-value for this feature
+                        if pval < test_dict[gene]['pval']:
+                            # if so, update for the best variant info to have this variants information
+                            test_dict[feature]['best_snp'] = genpos
+                            test_dict[feature]['pval'] = pval
+                            #test_dict[feature]['line'] = '\t'.join([feature])
+                        # and add the location of this variant to the list of variants tested for this feature
+                        test_dict[feature]['snps'].append(genpos)
+            else:
+                # get the p value
+                pval = float(ps_feature[i])
+                # check if this was the first time we handled this feature
+                if feature not in test_dict:
+                    # if so, add the entry
+                    test_dict[feature] = {'snps' : [genpos], 'best_snp' : genpos, 'pval' : pval, 'line' : '\t'.join([feature, str(phepos[0]), str(phepos[1])])}
+                else:
+                    # otherwise, check if this variant was more significant than the current most significant p-value for this feature
+                    if pval < test_dict[feature]['pval']:
+                        # if so, update for the best variant info to have this variants information
+                        test_dict[feature]['best_snp'] = genpos
+                        test_dict[feature]['pval'] = pval
+                        #test_dict[feature]['line'] = '\t'.join([feature])
+                    # and add the location of this variant to the list of variants tested for this feature
+                    test_dict[feature]['snps'].append(genpos)
+    # return the dictionary and the header of the file
+    return test_dict, "\t".join(['feature', 'chromStart', 'chromEnd'])
 
 def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var_thresh, window):
     """
@@ -611,32 +844,47 @@ if __name__=='__main__':
     parser.add_argument('--GENPOS', required = True, help = 'map of genotype to chr and position (as required by Matrix-eQTL)')
     parser.add_argument('--PHEPOS', required = True, help = 'map of measured phenotypes to chr and position (eg. gene expression to CHROM and TSS; as required by Matrix-eQTL)')
     parser.add_argument('--CHROM', required = True, help = 'Chromosome that is being processed (must match format of chr in POS)')
-    parser.add_argument('--cis_dist', type=float, default = 1e6, help = 'threshold for bp distance from the gene TSS to perform multiple testing correction (default = 1e6)')
+    parser.add_argument('--cis_dist', type=float, default = None, help = 'threshold for bp distance from the gene TSS to perform multiple testing correction, using no cis dist will consider all variants tested for a feature in the summary stats (default = None)')
     parser.add_argument('--external', action = 'store_true', help = 'indicates whether the provided genotype matrix is different from the one used to call cis-eQTLs initially (default = False)')
     parser.add_argument('--sample_list', default=None, help='File with sample IDs (one per line) to select from genotypes')
     parser.add_argument('--phenotype_groups', default=None, help='File with phenotype_id->group_id mapping')
     args = parser.parse_args()
 
-    ##Make SNP position dict
-    print('Processing genotype position file.', flush=True)
-    genpos_dict = make_genpos_dict(args.GENPOS, args.CHROM)
-
+    
     ##Make phenotype position dict
     print('Processing phenotype position file.', flush=True)
     phepos_dict = make_phepos_dict(args.PHEPOS, args.CHROM)
 
-    ##Make genotype dict
-    print('Processing genotype matrix.', flush=True)
+    ### get sample list
     if args.sample_list is not None:
         with open(args.sample_list) as f:
             sample_ids = f.read().strip().split('\n')
         print('  * using subset of '+str(len(sample_ids))+' samples.')
     else:
         sample_ids = None
-    gen_dict = make_gen_dict(args.GEN, genpos_dict, sample_ids)
+
+    ##Make SNP position dict
+    print('Processing genotype position file.', flush=True)
+    genpos_dict = make_genpos_dict(args.GENPOS, args.CHROM)
+    
+    # for matrixEQTL input/output we have a separate position file
+    if args.GEN.endswith('.bgen') is False:
+        ##Make genotype dict
+        print('Processing genotype matrix.', flush=True)
+        gen_dict = make_gen_dict(args.GEN, genpos_dict, sample_ids)
+    # for bgen we have both in the same file
+    else:
+        # read bgen file
+        print('Reading genotype data (bgen format)', flush=True)
+        bim,fam,bed,bgen = get_genotype_data_bgen(bgen_test_loc)
+        # and get the position and genotype data
+        print('Processing genotype data (bgen format)')
+        gen_dict = bgen_to_positions_and_genotypes(bim, fam, bgen, args.CHROM, minimumProbabilityStep=0.1, genpos_dict)
+    
 
     ##Make SNP-gene test dict
     if not args.external:
+        # parquet format (such as tensorqtl)
         if args.QTL.endswith('.parquet'):
             print('Processing tensorQTL tests file.', flush=True)
             if args.phenotype_groups is not None:
@@ -644,13 +892,24 @@ if __name__=='__main__':
                 group_size_s = group_s.value_counts()
             else:
                 group_size_s = None
-            test_dict, input_header = make_test_dict_tensorqtl(args.QTL, gen_dict, genpos_dict, args.cis_dist, group_size_s=group_size_s)
+            test_dict, input_header = make_test_dict_tensorqtl(args.QTL, genpos_dict, args.cis_dist, group_size_s=group_size_s)
+        # full summary stats of LIMIX-QTL
+        elif args.QTL.endswith('qtl_results_all.txt.gz'):
+            print('Processing LIMIX-QTL tests summary file.', flush=True)
+            genpos_dict, phepos_dict, test_dict, input_header = make_test_dict_limix(args.QTL, genpos_dict, args.cis_dist)
+        # chunked summary stats of LIMIX-QTL
+        elif args.QTL.endswith('h5'):
+            print('Processing LIMIX-QTL tests h5 file.', flush=True)
+            test_dict, input_header = make_test_dict_limix_h5(args.QTL, genpos_dict, phepos_dict, args.cis_dist)
+        # matrixEQTL format
         else:
             print('Processing Matrix-eQTL tests file.', flush=True)
             test_dict, input_header = make_test_dict(args.QTL, gen_dict, genpos_dict, phepos_dict, args.cis_dist)
+    # matrixEQTL format with different genotype data
     else:
         print('Processing Matrix-eQTL tests file. External genotype matrix and position file assumed.', flush=True)
         test_dict, input_header = make_test_dict_external(args.QTL, gen_dict, genpos_dict, phepos_dict, args.cis_dist)
+
 
     ##Perform BF correction using eigenvalue decomposition of the correlation matrix
     print('Performing eigenMT correction.', flush=True)
