@@ -139,6 +139,36 @@ def make_phepos_dict(POS_fh, CHROM):
     return pos_dict
 
 def get_genotype_data_bgen(bgen_loc):
+    """
+    Reads a BGEN file and processes it to return genotype data in a format similar to PLINK.
+
+    Parameters:
+    -----------
+    bgen_loc : str
+        The location of the BGEN file to be read.
+
+    Returns:
+    --------
+    tuple
+        A tuple containing the following elements:
+        - bim : pandas.DataFrame
+            DataFrame containing variant information, formatted similarly to a PLINK BIM file.
+        - fam : pandas.DataFrame
+            DataFrame containing sample information, formatted similarly to a PLINK FAM file.
+        - bed : None
+            Placeholder for BED file data, which is not used in this function.
+        - bgen : dict
+            Dictionary containing the raw BGEN data.
+
+    Notes:
+    ------
+    - The function reads the BGEN file using `bgen_reader`.
+    - The FAM DataFrame is created from the samples in the BGEN file.
+    - The BIM DataFrame is created from the variants in the BGEN file and includes additional processing to match PLINK format.
+    - Chromosome IDs are fixed to remove 'chr' prefix and replace certain values with numeric equivalents.
+    - Only biallelic SNPs and ploidy 2 variants are supported.
+    """
+    
     # read the bgen file using bgen_reader
     bgen = read_bgen(bgen_loc, verbose=False)
     # the bed will be empty
@@ -169,7 +199,39 @@ def get_genotype_data_bgen(bgen_loc):
     # return the variables
     return bim,fam,bed,bgen
 
-def bgen_to_positions_and_genotypes(bim, fam, bgen, CHROM, minimumProbabilityStep=0.1, genpos_dict=None):
+def bgen_to_genotypes(bim, fam, bgen, CHROM, minimumProbabilityStep=0.1, genpos_dict=None):
+    """
+    Converts BGEN genotype data to a dictionary of genotypes for a specified chromosome.
+
+    Parameters:
+    -----------
+    bim : pandas.DataFrame
+        DataFrame containing variant information, formatted similarly to a PLINK BIM file.
+    fam : pandas.DataFrame
+        DataFrame containing sample information, formatted similarly to a PLINK FAM file.
+    bgen : dict
+        Dictionary containing the raw BGEN data.
+    CHROM : str
+        The chromosome for which to extract genotype data.
+    minimumProbabilityStep : float, optional
+        The minimum probability step to consider a genotype as valid (default is 0.1).
+    genpos_dict : dict, optional
+        Dictionary of genomic positions to filter the variants (default is None).
+
+    Returns:
+    --------
+    dict
+        A dictionary where keys are chromosomal positions and values are numpy arrays of genotypes for each variant.
+
+    Notes:
+    ------
+    - The function creates a dictionary of chromosomal positions as keys and the genotypes for that variant as numpy arrays.
+    - It filters SNP indices based on the specified chromosome and optionally by genomic positions.
+    - Genotypes are processed differently based on whether they are phased or not.
+    - Non-biallelic SNPs and variants with ploidy other than 2 are excluded.
+    - Missing genotype values are imputed with the mean of known values.
+    """
+    
     # create dictionary of chromosomal positions as keys and the genotypes for that variant as a numpy array
     gen_dict = {}
     # get the SNP indices from the bim
@@ -494,6 +556,37 @@ def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist
     return test_dict, "\t".join(header)
 
 def make_test_dict_limix(QTL_fh, cis_dist=None):
+    """
+    Processes QTL data to create dictionaries of genomic and phenotypic positions, and a dictionary of test results.
+
+    Parameters:
+    -----------
+    QTL_fh : str
+        File handle for the QTL data file.
+    cis_dist : int, optional
+        Maximum distance for cis-acting variants (default is None).
+
+    Returns:
+    --------
+    tuple
+        A tuple containing the following elements:
+        - genpos_dict : dict
+            Dictionary with variant identifiers as keys and their genomic positions as values.
+        - phepos_dict : dict
+            Dictionary with feature identifiers as keys and their start and end positions as values.
+        - test_dict : dict
+            Dictionary with feature identifiers as keys and dictionaries of test results as values.
+        - header : str
+            The header line of the QTL file.
+
+    Notes:
+    ------
+    - The function reads the QTL file and identifies the p-value column.
+    - It creates dictionaries for genomic positions, phenotypic positions, and test results.
+    - Test results include all variants for each feature, the variant with the lowest p-value, and the corresponding line from the QTL file.
+    - Only variants within the specified cis distance are considered.
+    """
+    
     # for the limix output, the feature column is actually the first column
     feature_index_col = 0
     # and the variant is the second one
@@ -590,6 +683,36 @@ def make_test_dict_limix(QTL_fh, cis_dist=None):
     
 
 def make_test_dict_limix_h5(QTL_h5_path, genpos_dict, phepos_dict, cis_dist=None):
+    """
+    Processes QTL data from an HDF5 file to create a dictionary of test results.
+
+    Parameters:
+    -----------
+    QTL_h5_path : str
+        Path to the HDF5 file containing QTL data.
+    genpos_dict : dict
+        Dictionary with variant identifiers as keys and their genomic positions as values.
+    phepos_dict : dict
+        Dictionary with feature identifiers as keys and their start and end positions as values.
+    cis_dist : int, optional
+        Maximum distance for cis-acting variants (default is None).
+
+    Returns:
+    --------
+    tuple
+        A tuple containing the following elements:
+        - test_dict : dict
+            Dictionary with feature identifiers as keys and dictionaries of test results as values.
+        - header : str
+            The header line of the QTL file.
+
+    Notes:
+    ------
+    - The function reads the QTL data from an HDF5 file.
+    - It creates a dictionary for test results, including all variants for each feature, the variant with the lowest p-value, and the corresponding line from the QTL file.
+    - Only variants within the specified cis distance are considered.
+    """
+    
     # make filehandle to the h5
     h5_fh = h5py.File(QTL_h5_path,'r')
     # create a dictionary that has each feature/phenotype/gene as a key, as as the value another dictionary with:
@@ -879,7 +1002,7 @@ if __name__=='__main__':
         bim,fam,bed,bgen = get_genotype_data_bgen(bgen_test_loc)
         # and get the position and genotype data
         print('Processing genotype data (bgen format)')
-        gen_dict = bgen_to_positions_and_genotypes(bim, fam, bgen, args.CHROM, minimumProbabilityStep=0.1, genpos_dict)
+        gen_dict = bgen_to_genotypes(bim, fam, bgen, args.CHROM, minimumProbabilityStep=0.1, genpos_dict)
     
 
     ##Make SNP-gene test dict
