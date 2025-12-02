@@ -22,8 +22,56 @@ from bgen_reader import read_bgen
 import h5py
 import tempfile
 import json
+# for making checksums
+import hashlib
+# for warnings
+import warnings
 
 ##############FUNCTIONS##############
+
+def create_hash_file(input_file, algorithm="sha256"):
+    """
+    Creates a hash of the specified file using the given algorithm and writes it
+    to a new file with the same name but an extension matching the algorithm.
+
+    Args:
+        input_file (str): Path to the input file for which the hash should be created.
+        algorithm (str): Hash algorithm to use (e.g., 'md5', 'sha1', 'sha256', 'sha512').
+
+    Returns:
+        int: Returns 0 on success, 1 on failure.
+
+    Raises:
+        FileNotFoundError: If the input file does not exist.
+        ValueError: If the specified algorithm is not supported by hashlib.
+        IOError: If there is an error reading the input file or writing the output file.
+    """
+    try:
+        # Validate algorithm
+        if algorithm.lower() not in hashlib.algorithms_available:
+            raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+        with open(input_file, "rb") as f:
+            # Python 3.11+ shortcut if available
+            if callable(getattr(hashlib, 'file_digest', None)):
+                digest = hashlib.file_digest(f, algorithm.lower())
+            else:
+                digest = hashlib.new(algorithm.lower())
+                while chunk := f.read(8192):
+                    digest.update(chunk)
+
+        # Output file path with .<algorithm> extension
+        output_hash_loc = f"{input_file}.{algorithm.lower()}"
+
+        with open(output_hash_loc, "w") as out_file:
+            out_file.write(digest.hexdigest())
+
+        return 0
+
+    except Exception as e:
+        print(f"Exception occurred upon {algorithm} file creation: {e}")
+        return 1
+
 
 def open_file(filename):
     """
@@ -1493,8 +1541,11 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
     None
     """
     
-    # open the output file for writing
-    OUT = open(OUT_fh, 'w')
+    # open the output file for writing (gzip if .gz extension)
+    if isinstance(OUT_fh, str) and OUT_fh.endswith('.gz'):
+        OUT = gzip.open(OUT_fh, 'wt')
+    else:
+        OUT = open(OUT_fh, 'w')
     # write the header to the file (add grand-total p-value and grand-total test count columns)
     OUT.write(input_header + '\tfeature_eigen_p\tfeature_n_tests\tglobal_eigen_p\tglobal_n_tests\n')
     # keep track of how many phenotypes we have processeds
@@ -1886,7 +1937,9 @@ if __name__=='__main__':
     the genotype correlation matrix. Picks best SNP per gene.
     """
 
+    # initalize parser
     parser = argparse.ArgumentParser(description = USAGE)
+    # add the huge list of arguments
     parser.add_argument('--QTL', required = False, help = 'Matrix-EQTL output file with SNP-gene tests (can be gzipped)')
     parser.add_argument('--TENSOR', required = False, help = 'tensorQTL output file with SNP-gene tests (can be gzipped)')
     parser.add_argument('--LIMIX', required = False, help = 'LIMIX-QTL output file with SNP-gene tests (can be gzipped)')
@@ -1905,6 +1958,7 @@ if __name__=='__main__':
     parser.add_argument('--sample_list', default=None, help='File with sample IDs (one per line) to select from genotypes')
     parser.add_argument('--phenotype_groups', default=None, help='File with phenotype_id->group_id mapping')
     parser.add_argument('--tmp_dir', default=None, help='Directory to create temporary files in (optional)')
+    # finally parse the arguments
     args = parser.parse_args()
 
     # Determine which QTL input was supplied and extract the set of variants used
@@ -1928,10 +1982,12 @@ if __name__=='__main__':
         print('Extracting variants from LIMIX H5 file...', flush=True)
         used_variants = get_variants_from_limix_h5(args.LIMIX_H5, genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
 
+    # let the user know what the total number of used variants is
     print('  * variants extracted:', len(used_variants), flush=True)
 
-    
-    ##Make phenotype position dict (allow extraction from LIMIX input when PHEPOS not provided)
+    # initalize the phenotype position dictionary
+    phepos_dict = {}
+    # fill phenotype position dict using supplied PHEPOS file
     if args.PHEPOS:
         print('Processing phenotype position file.', flush=True)
         phepos_dict = make_phepos_dict(args.PHEPOS, args.CHROM)
@@ -1948,12 +2004,16 @@ if __name__=='__main__':
             if not phepos_dict:
                 print('Warning: could not extract phenotype positions from LIMIX H5 file; phepos_dict will be empty.', file=sys.stderr)
         else:
+            # we need the position information, or we cannot sort the variants into cis windows
             sys.exit('No phenotype positions file supplied and no LIMIX input to extract phenotypes from. Provide --PHEPOS or LIMIX/LIMIX_H5 input.')
 
-    ### get sample list
+    # get sample list
     if args.sample_list is not None:
+        # extract sample IDs from file
         with open(args.sample_list) as f:
+            # they should be with a new sample on each line
             sample_ids = f.read().strip().split('\n')
+        # let the user know how many samples we are using
         print('  * using subset of '+str(len(sample_ids))+' samples.')
     else:
         sample_ids = None
@@ -1962,12 +2022,15 @@ if __name__=='__main__':
     genpos_dict = {}
     gen_dict = {}
 
+    # load genotype position data (needed for Matrix-eQTL format)
     if args.GENPOS:
         print('Processing genotype position file.', flush=True)
         genpos_dict = make_genpos_dict(args.GENPOS, args.CHROM)
-        # also build a mapping variant -> chromosome for filtering QTLs by CHROM
+        # also build a dictionary that stores which chromosome each variant is on (for chromosome-aware filtering)
         genchrom_dict = {}
+        # read the genpos file again to populate genchrom_dict
         with open_file(args.GENPOS) as POS:
+            # read each line
             POS.readline()
             for line in POS:
                 parts = line.rstrip().split()
@@ -1977,9 +2040,12 @@ if __name__=='__main__':
     # Load genotype matrix if provided (Matrix-eQTL format)
     if args.GEN and (not args.GEN.endswith('.bgen')):
         print('Processing genotype matrix (Matrix-eQTL format).', flush=True)
+        # we need the positions for filtering and ordering
         if not genpos_dict:
             print('Warning: GENPOS not supplied; genpos_dict will be empty.', file=sys.stderr)
+        # make the dictionary of genotypes keyed by variant ID
         gen_dict = make_gen_dict_matrixqtl(args.GEN, genpos_dict, sample_ids)
+    # read bgen format
     elif args.BGEN:
         print('Reading BGEN genotype data...', flush=True)
         try:
@@ -1988,6 +2054,7 @@ if __name__=='__main__':
         except Exception as e:
             print('Warning: could not read/process BGEN file; genotypes will not be loaded: ' + str(e), file=sys.stderr)
             gen_dict = {}
+    # read plink1 format
     elif args.PLINK1:
         print('Reading PLINK1 genotype data...', flush=True)
         try:
@@ -2009,52 +2076,7 @@ if __name__=='__main__':
             print('Warning: could not read/process PLINK1 files; genotypes will not be loaded: ' + str(e), file=sys.stderr)
             gen_dict = {}
 
-    # Diagnostic: report how many used_variants map into genotype data (helps debug key mismatches)
-    # if used_variants:
-    #     total_used = len(used_variants)
-    #     present_variant_key = sum(1 for v in used_variants if v in gen_dict)
-    #     present_via_genpos = 0
-    #     present_via_genpos_int = 0
-    #     for v in used_variants:
-    #         gp = genpos_dict.get(v)
-    #         if gp is not None:
-    #             # direct match
-    #             if gp in gen_dict:
-    #                 present_via_genpos += 1
-    #             # integer position match
-    #             try:
-    #                 gi = int(gp)
-    #                 if gi in gen_dict:
-    #                     present_via_genpos_int += 1
-    #             except Exception:
-    #                 pass
-    #     print(f"Variant mapping diagnostic: used_variants={total_used}, present_by_variant_key={present_variant_key}, present_by_genpos={present_via_genpos}, present_by_genpos_int={present_via_genpos_int}", flush=True)
-    #     # show a few examples of mismatches
-    #     mismatches = []
-    #     for v in used_variants[:50]:
-    #         gp = genpos_dict.get(v)
-    #         in_gen = v in gen_dict
-    #         in_pos = gp in gen_dict if gp is not None else False
-    #         try:
-    #             in_pos_int = int(gp) in gen_dict if gp is not None else False
-    #         except Exception:
-    #             in_pos_int = False
-    #         if not (in_gen or in_pos or in_pos_int):
-    #             mismatches.append((v, gp, in_gen, in_pos, in_pos_int))
-    #         if len(mismatches) >= 10:
-    #             break
-    #     if mismatches:
-    #         print('Sample mismatches (variant, genpos, in_genkey, in_genpos, in_genpos_int):', flush=True)
-    #         for x in mismatches:
-    #             print('\t' + '\t'.join([str(i) for i in x]), flush=True)
-    #     # show a few genotype keys to inspect types
-    #     try:
-    #         sample_keys = list(gen_dict.keys())[:10]
-    #         print('Sample genotype keys (first 10):', sample_keys, flush=True)
-    #     except Exception:
-    #         pass
-
-    # Make the test_dict and input_header based on the QTL input type
+    # Initialize the test_dict and input_header parameters that are filled based on the QTL input type
     test_dict = {}
     input_header = ''
 
@@ -2068,6 +2090,7 @@ if __name__=='__main__':
     else:
         group_size_s = None
 
+    # the method for extracting the tests that were performed, and the header of the file are different depending on which type of QTL input is supplied
     if args.TENSOR:
         print('Processing tensorQTL tests file.', flush=True)
         test_dict, input_header = make_test_dict_tensorqtl(args.TENSOR, genpos_dict, args.cis_dist, group_size_s=group_size_s, genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
@@ -2087,3 +2110,5 @@ if __name__=='__main__':
     ##Perform BF correction using eigenvalue decomposition of the correlation matrix
     print('Performing eigenMT correction.', flush=True)
     bf_eigen_windows(test_dict, gen_dict, phepos_dict, args.OUT, input_header, args.var_thresh, args.window, tmp_dir=args.tmp_dir)
+    # make a checksum
+    create_hash_file(args.OUT)
