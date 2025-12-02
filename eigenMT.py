@@ -20,6 +20,8 @@ import gzip
 from sklearn import covariance
 from bgen_reader import read_bgen
 import h5py
+import tempfile
+import json
 
 ##############FUNCTIONS##############
 
@@ -43,6 +45,70 @@ def open_file(filename):
     else:
         opener = open(filename)
     return opener
+
+def make_genpos_dict(POS_fh, CHROM=None):
+    """
+    Read SNPs and their positions from a file and create a dictionary.
+
+    If CHROM is supplied, only SNPs on that chromosome are returned. If CHROM is None,
+    SNPs from all chromosomes are returned.
+
+    Parameters:
+    POS_fh (str or file-like object): File handle or path to the file containing SNP positions.
+    CHROM (str, optional): Chromosome identifier to filter SNPs by chromosome. If None, keep all chromosomes.
+
+    Returns:
+    dict: Dictionary with SNP IDs as keys and their positions as float values.
+    """
+
+    # create dictionary of variant as keys, and chromosomal positions as values
+    pos_dict = {}
+    # open with the supplied filehandle
+    with open_file(POS_fh) as POS:
+        # move the cursor past the header
+        POS.readline()  # skip header
+        # read each line
+        for line in POS:
+            # split by whitespace, and remove the trailing newline
+            line = line.rstrip().split()
+            # if CHROM is not supplied, accept all chromosomes; otherwise only keep matches
+            if CHROM is None or line[1] == CHROM:
+                # add to the dictionary the variant as key, and the chromosomal position as the value
+                pos_dict[line[0]] = float(line[2])
+    return pos_dict
+
+def make_phepos_dict(POS_fh, CHROM=None):
+    """
+    Read phenotypes (probes, genes, peaks) with their start and end positions from a file and create a dictionary.
+
+    If CHROM is supplied, only phenotypes on that chromosome are returned. If CHROM is None, all phenotypes
+    (from all chromosomes) are returned.
+
+    Parameters:
+    POS_fh (str or file-like object): File handle or path to the file containing phenotype positions.
+    CHROM (str, optional): Chromosome identifier to filter phenotypes by chromosome. If None, keep all chromosomes.
+
+    Returns:
+    dict: Dictionary with phenotype IDs as keys and their start and end positions as numpy arrays (float64).
+    """
+
+    # create dictionary of phenotypes as keys, and a list of the start and stop as the values
+    pos_dict = {}
+    # open with supplied filehandle
+    with open_file(POS_fh) as POS:
+        # move the cursor past the header
+        POS.readline()  # skip header
+        # read each line
+        for line in POS:
+            # split by whitespace, removing the trailing newline
+            line = line.rstrip().split()
+            # if CHROM is not supplied, accept all chromosomes; otherwise only keep matches
+            if CHROM is None or line[1] == CHROM:
+                # grab the start and stop (columns 2 and 3)
+                pos_array = np.array(line[2:4], dtype=np.float64)
+                # add to the dictionary the phenotype as key, and the list of start and stop as values
+                pos_dict[line[0]] = pos_array
+    return pos_dict
 
 def load_tensorqtl_output(tensorqtl_parquet, group_size_s=None):
     """
@@ -80,200 +146,8 @@ def load_tensorqtl_output(tensorqtl_parquet, group_size_s=None):
         df['p-value'] = np.minimum(df['p-value']*df['gene_id'].map(group_size_s), 1.0)
     return df
 
-def make_genpos_dict(POS_fh, CHROM):
-    """
-    Read SNPs and their positions from a file and create a dictionary.
     
-    Parameters:
-    POS_fh (str or file-like object): File handle or path to the file containing SNP positions.
-    CHROM (str): Chromosome identifier to filter SNPs by chromosome.
-    
-    Returns:
-    dict: Dictionary with SNP IDs as keys and their positions as values, filtered by the specified chromosome.
-    """
-    
-    # create dictionary of variant as keys, and chromosomal positions as values
-    pos_dict = {}
-    # open with the supplied filehandle
-    with open_file(POS_fh) as POS:
-        # move the cursor past the header
-        POS.readline()  # skip header
-        # read each line
-        for line in POS:
-            # split by whitespace, and remove the trailing newline
-            line = line.rstrip().split()
-            # we do one chromosome at a time, so only if we are looking at the relevant chromosome, will we add to the dictionary
-            if line[1] == CHROM:
-                # add to the dictionary the variant as key, and the chromosomal position as the value
-                pos_dict[line[0]] = float(line[2])
-    return pos_dict
-
-def make_phepos_dict(POS_fh, CHROM):
-    """
-    Read phenotypes (probes, genes, peaks) with their start and end positions from a file and create a dictionary.
-    
-    Parameters:
-    POS_fh (str or file-like object): File handle or path to the file containing phenotype positions.
-    CHROM (str): Chromosome identifier to filter phenotypes by chromosome.
-    
-    Returns:
-    dict: Dictionary with phenotype IDs as keys and their start and end positions as values, filtered by the specified chromosome.
-    """
-    
-    # create dictionary of phenotypes as keys, and a list of the start and stop as the values
-    pos_dict = {}
-    # open with supplied filehandle
-    with open_file(POS_fh) as POS:
-        # move the cursor past the header
-        POS.readline()  # skip header
-        # read each line
-        for line in POS:
-            # split by whitespace, removing the trailing newline
-            line = line.rstrip().split()
-            # we do one chromosome at a time, so only if we are looking at the relevant chromosome, will we add to the dictionary
-            if line[1] == CHROM:
-                # grab the last two values, which should be the start and stop
-                pos_array = np.array(line[2:4])
-                # add to the dictionary the phenotype as key, and the list of start and stop as values
-                pos_dict[line[0]] = np.float64(pos_array)
-    return pos_dict
-
-def get_genotype_data_bgen(bgen_loc):
-    """
-    Reads a BGEN file and processes it to return genotype data in a format similar to PLINK.
-
-    Parameters:
-    -----------
-    bgen_loc : str
-        The location of the BGEN file to be read.
-
-    Returns:
-    --------
-    tuple
-        A tuple containing the following elements:
-        - bim : pandas.DataFrame
-            DataFrame containing variant information, formatted similarly to a PLINK BIM file.
-        - fam : pandas.DataFrame
-            DataFrame containing sample information, formatted similarly to a PLINK FAM file.
-        - bed : None
-            Placeholder for BED file data, which is not used in this function.
-        - bgen : dict
-            Dictionary containing the raw BGEN data.
-
-    Notes:
-    ------
-    - The function reads the BGEN file using `bgen_reader`.
-    - The FAM DataFrame is created from the samples in the BGEN file.
-    - The BIM DataFrame is created from the variants in the BGEN file and includes additional processing to match PLINK format.
-    - Chromosome IDs are fixed to remove 'chr' prefix and replace certain values with numeric equivalents.
-    - Only biallelic SNPs and ploidy 2 variants are supported.
-    """
-    
-    # read the bgen file using bgen_reader
-    bgen = read_bgen(bgen_loc, verbose=False)
-    # the bed will be empty
-    bed=None
-    # fake the fam to be like plink format
-    fam = bgen['samples']
-    fam = fam.to_frame("iid")
-    fam.set_index('iid',inplace=True)
-    fam.index = fam.index.astype(str)
-    # fake the bim to be like plink format
-    bim = bgen['variants'].compute()
-    bim = bim.assign(i = range(bim.shape[0]))
-    bim['id'] = bim['rsid']
-    bim = bim.rename(index = str, columns = {"id": "snp"})
-    bim['a1'] = bim['allele_ids'].str.split(",", expand=True)[0]
-    bim.index = bim["snp"].astype(str).values
-    bim.index.name = "candidate"
-        
-    ##Fix chromosome ids
-    #bim['chrom'].replace('^chr','',regex = True,inplace = True)
-    bim['chrom'] = bim['chrom'].replace('^chr', '', regex=True)
-    #bim['chrom'].replace(['X', 'Y', 'XY', 'MT'], ['23', '24', '25', '26'],inplace=True)
-    bim['chrom'] = bim['chrom'].replace(['X', 'Y', 'XY', 'MT'], ['23', '24', '25', '26'])
-    ##Remove non-biallelic & non-ploidy 2 (to be sure). (These can't happen in binary plink files).
-    print("Warning, the current software only supports biallelic SNPs and ploidy 2")
-    bim = bim.loc[np.logical_and(bim['nalleles'] < 3,bim['nalleles'] > 0),:]
-
-    # return the variables
-    return bim,fam,bed,bgen
-
-def bgen_to_genotypes(bim, fam, bgen, CHROM, minimumProbabilityStep=0.1, genpos_dict=None):
-    """
-    Converts BGEN genotype data to a dictionary of genotypes for a specified chromosome.
-
-    Parameters:
-    -----------
-    bim : pandas.DataFrame
-        DataFrame containing variant information, formatted similarly to a PLINK BIM file.
-    fam : pandas.DataFrame
-        DataFrame containing sample information, formatted similarly to a PLINK FAM file.
-    bgen : dict
-        Dictionary containing the raw BGEN data.
-    CHROM : str
-        The chromosome for which to extract genotype data.
-    minimumProbabilityStep : float, optional
-        The minimum probability step to consider a genotype as valid (default is 0.1).
-    genpos_dict : dict, optional
-        Dictionary of genomic positions to filter the variants (default is None).
-
-    Returns:
-    --------
-    dict
-        A dictionary where keys are chromosomal positions and values are numpy arrays of genotypes for each variant.
-
-    Notes:
-    ------
-    - The function creates a dictionary of chromosomal positions as keys and the genotypes for that variant as numpy arrays.
-    - It filters SNP indices based on the specified chromosome and optionally by genomic positions.
-    - Genotypes are processed differently based on whether they are phased or not.
-    - Non-biallelic SNPs and variants with ploidy other than 2 are excluded.
-    - Missing genotype values are imputed with the mean of known values.
-    """
-    
-    # create dictionary of chromosomal positions as keys and the genotypes for that variant as a numpy array
-    gen_dict = {}
-    # get the SNP indices from the bim
-    snp_idxs = bim['i'].values
-    # get the SNP identifiers
-    snp_names = bim.rsid.tolist()
-    # get the chromosomal locations
-    chrom_locs = bim.pos.tolist()
-    # get the chromosomes present
-    snp_chromosomes = bim.chrom.tolist()
-    # subset to the variant indices that are of the chromosome we are looking at
-    snp_idxs = [snp_idxs[i] for i, x in enumerate(snp_chromosomes) if x == CHROM]
-    snp_names = [snp_names[i] for i, x in enumerate(snp_chromosomes) if x == CHROM]
-    # and the variants that are our search space
-    if genpos_dict is not None:
-        #snp_idxs = snp_idxs[x for x in snp_names if x in genpos_dict.keys()]
-        snp_idxs = [snp_idxs[i] for i, x in enumerate(snp_names) if x in genpos_dict.keys()]
-    # check each snp index
-    for snpId in snp_idxs :
-        # get the genotype
-        geno = bgen["genotype"][snpId].compute()
-        if (all(geno["ploidy"]==2)) :
-            # initialize the dosage
-            snp_df_dosage_t = None
-            # depending on the phasing we might do slightly different things
-            if(geno["phased"]):
-                snp_df_dosage_t = geno["probs"][:,[0,2]].sum(1).astype(float)
-                naId = (np.amax(geno["probs"][:,:2],1)+np.amax(geno["probs"][:,2:4],1))<(1+minimumProbabilityStep)
-                snp_df_dosage_t[naId] = -1
-            else :
-                snp_df_dosage_t = ((geno["probs"][:,0]* 2)+geno["probs"][:,1]).astype(float)
-                naId = np.amax(geno["probs"][:,:3],1)<((1/3)+minimumProbabilityStep)
-                snp_df_dosage_t[naId] = -1
-            # convert to float values
-            snp_df_dosage_t = np.float64(snp_df_dosage_t)
-            # set the variants we had marked as -1, so the unknown ones, to be the mean of the variants that we do know the values of
-            snp_df_dosage_t[snp_df_dosage_t == -1] = np.mean(snp_df_dosage_t[snp_df_dosage_t != -1])
-            # finally put in the dictionary for each variant position as key, the genotypes for that variant
-            gen_dict[chrom_locs[snpId]] = snp_df_dosage_t
-    return gen_dict
-    
-def make_gen_dict(GEN_fh, pos_dict, sample_ids=None):
+def make_gen_dict_matrixqtl(GEN_fh, pos_dict, sample_ids=None):
     """
     Read genotype matrix from MatrixEQTL and create a dictionary.
     
@@ -316,7 +190,481 @@ def make_gen_dict(GEN_fh, pos_dict, sample_ids=None):
             gen_dict[snp] = genos
     return gen_dict  # pos->genotypes
 
-def make_test_dict(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist=None, pvalue_column=None):
+
+def get_genotype_data_bgen(bgen_loc):
+    """
+    Read a BGEN file using bgen_reader and return (bim, fam, bed, bgen_object).
+
+    The returned `bim` is a pandas.DataFrame with at least columns: ['snp','chrom','pos','allele_ids','nalleles','i']
+    The returned `fam` is a pandas.DataFrame with sample IDs in column 'iid' (and placeholder PLINK columns).
+    `bed` is returned as None (placeholder).
+    `bgen` is the raw object returned by `read_bgen` for downstream per-variant access.
+    """
+    # read the bgen file using bgen_reader
+    bgen = read_bgen(bgen_loc, verbose=False)
+    # initialize bed-like
+    bed = None
+
+    # normalize samples -> pandas Index/Series
+    samples = None
+    # try to get samples
+    try:
+        samples_obj = bgen['samples']
+        # if dask-like
+        if hasattr(samples_obj, 'compute'):
+            # if dask format, we need to call compute to get the actual values
+            samples = samples_obj.compute()
+        else:
+            samples = samples_obj
+    except Exception:
+        # try other attribute names
+        samples = None
+    # if we were able to extract the samples
+    if samples is None:
+        # generate a fam-like with no samples
+        fam = pd.DataFrame(columns=['fid', 'iid', 'father', 'mother', 'sex', 'phenotype'])
+    else:
+        # samples may be an Index, ndarray or Series
+        sample_list = list(samples)
+        # create a PLINK-like fam with placeholders
+        fam = pd.DataFrame({
+            'fid': [str(s).split(':')[0] for s in sample_list],
+            'iid': [str(s) for s in sample_list],
+            'father': [0]*len(sample_list),
+            'mother': [0]*len(sample_list),
+            'sex': [0]*len(sample_list),
+            'phenotype': [-9]*len(sample_list)
+        })
+
+    # normalize variants
+    try:
+        # extract the variants
+        vars_obj = bgen['variants']
+        # again, if dask-like, we need to call compute to get the actual values
+        if hasattr(vars_obj, 'compute'):
+            vars_df = vars_obj.compute()
+        else:
+            vars_df = vars_obj
+    except Exception:
+        vars_df = None
+
+    if vars_df is None:
+        # if there is no info we could grab, we create an empty bim
+        bim = pd.DataFrame(columns=['snp', 'chrom', 'pos', 'allele_ids', 'nalleles', 'i'])
+        return bim, fam, bed, bgen
+
+    # make sure the variant table is in dataframe format
+    vars_df = pd.DataFrame(vars_df)
+
+    # set the rsid as the snp column
+    if 'rsid' in vars_df.columns:
+        vars_df['snp'] = vars_df['rsid'].astype(str)
+    # or the id if rsid is not present
+    elif 'id' in vars_df.columns:
+        vars_df['snp'] = vars_df['id'].astype(str)
+    # or if neither, use the position and chromosome
+    else:
+        # compose a unique id
+        chrom_col = vars_df.columns[0] if 'chrom' not in vars_df.columns else 'chrom'
+        pos_col = 'pos' if 'pos' in vars_df.columns else (vars_df.columns[1] if vars_df.shape[1] > 1 else None)
+        if pos_col is not None:
+            vars_df['snp'] = vars_df.apply(lambda r: f"{r.get('chrom', '')}:{r.get('pos', '')}", axis=1).astype(str)
+        # if even the position is not there, then just use the index
+        else:
+            vars_df['snp'] = vars_df.index.astype(str)
+
+    # grab the columns we need
+    # chromosome
+    if 'chrom' not in vars_df.columns:
+        # try other common names
+        for cand in ['chromosome', 'contig']:
+            if cand in vars_df.columns:
+                vars_df['chrom'] = vars_df[cand]
+                break
+    # position
+    if 'pos' not in vars_df.columns:
+        for cand in ['position', 'bp', 'snp_position']:
+            if cand in vars_df.columns:
+                vars_df['pos'] = vars_df[cand]
+                break
+
+    # allele ids
+    if 'allele_ids' not in vars_df.columns and 'alleles' in vars_df.columns:
+        vars_df['allele_ids'] = vars_df['alleles']
+
+    # number of alleles
+    if 'nalleles' not in vars_df.columns:
+        if 'allele_ids' in vars_df.columns:
+            vars_df['nalleles'] = vars_df['allele_ids'].apply(lambda x: len(str(x).split(',')) if pd.notnull(x) else 0)
+        else:
+            vars_df['nalleles'] = 2
+
+    # add integer index mapping to genotype array positions
+    vars_df = vars_df.reset_index(drop=True)
+    vars_df['i'] = range(len(vars_df))
+
+    # create bim with required columns
+    bim = pd.DataFrame({
+        'snp': vars_df['snp'].astype(str),
+        'chrom': vars_df['chrom'].astype(str) if 'chrom' in vars_df.columns else ['']*len(vars_df),
+        'pos': vars_df['pos'].astype(int) if 'pos' in vars_df.columns else [0]*len(vars_df),
+        'allele_ids': vars_df['allele_ids'] if 'allele_ids' in vars_df.columns else ['']*len(vars_df),
+        'nalleles': vars_df['nalleles'],
+        'i': vars_df['i']
+    })
+
+    # set index name
+    bim.index = bim['snp'].astype(str)
+    bim.index.name = 'candidate'
+
+    return bim, fam, bed, bgen
+
+
+def bgen_to_genotypes(bim, fam, bgen, CHROM, minimumProbabilityStep=0.1, genpos_dict=None):
+    """
+    Convert a bgen object (as returned by read_bgen) into a dictionary mapping
+    genomic position -> dosage numpy array (samples in fam order).
+
+    This implementation is defensive about various bgen_reader return types and
+    attempts to handle common probability layouts.
+    """
+    gen_dict = {}
+
+    # normalize chromosome representation
+    chrom_str = str(CHROM) if CHROM is not None else ''
+    chrom_str = chrom_str.replace('chr', '')
+
+    # ensure required columns in bim
+    if 'i' not in bim.columns:
+        return gen_dict
+
+    snp_idxs = list(bim['i'].values)
+    snp_names = list(bim['snp'].values)
+    chroms = list(bim['chrom'].astype(str).values) if 'chrom' in bim.columns else [''] * len(bim)
+    positions = list(bim['pos'].values) if 'pos' in bim.columns else [None] * len(bim)
+    allele_ids_list = list(bim['allele_ids'].values) if 'allele_ids' in bim.columns else [None] * len(bim)
+
+    # select SNPs on requested chromosome
+    sel_indices = [i for i, c in enumerate(chroms) if str(c).replace('chr', '') == chrom_str]
+    sel = [(snp_idxs[i], snp_names[i], positions[i]) for i in sel_indices]
+
+    # optionally filter by genpos_dict (which maps variant ID -> position)
+    if genpos_dict is not None:
+        sel = [(idx, name, pos) for (idx, name, pos) in sel if name in genpos_dict]
+
+    for sel_i, (snp_idx, snp_name, snp_pos) in enumerate(sel):
+        try:
+            allele_ids = allele_ids_list[sel_indices[sel_i]] if allele_ids_list is not None and len(allele_ids_list) > 0 else None
+        except Exception:
+            allele_ids = None
+        chrom_val = chroms[sel_indices[sel_i]] if chroms is not None and len(chroms) > 0 else None
+        # snp_name, snp_pos, allele_ids, chrom_val now available for building chr:pos:ref:alt keys
+        try:
+            geno = bgen['genotype'][snp_idx]
+            if hasattr(geno, 'compute'):
+                geno = geno.compute()
+        except Exception:
+            # couldn't access this variant; skip
+            continue
+
+        # geno expected to have keys/attributes: 'probs', 'ploidy', optionally 'phased'
+        probs = None
+        ploidy = None
+        phased = False
+        if isinstance(geno, dict):
+            probs = geno.get('probs', None)
+            ploidy = geno.get('ploidy', None)
+            phased = bool(geno.get('phased', False))
+        else:
+            probs = getattr(geno, 'probs', None)
+            ploidy = getattr(geno, 'ploidy', None)
+            phased = bool(getattr(geno, 'phased', False))
+
+        if probs is None:
+            continue
+
+        probs = np.asarray(probs)
+
+        # skip non-diploid if ploidy info present
+        if ploidy is not None:
+            try:
+                if np.any(np.array(ploidy) != 2):
+                    continue
+            except Exception:
+                pass
+
+        # compute dosage from probs
+        try:
+            if probs.ndim == 2 and probs.shape[1] >= 3:
+                # assume columns [P0,P1,P2]
+                p1 = probs[:, 1]
+                p2 = probs[:, 2]
+                dosage = p1 + 2.0 * p2
+                max_prob = np.max(probs[:, :3], axis=1)
+                na_mask = max_prob < ((1.0 / 3.0) + minimumProbabilityStep)
+            else:
+                # fallback: use available probs, mark missing if max prob is low
+                max_prob = np.max(probs, axis=1)
+                # cannot compute expected dosage reliably without at least 3 cols
+                continue
+        except Exception:
+            continue
+
+        dosage = np.asarray(dosage, dtype=float)
+        dosage[na_mask] = np.nan
+
+        if np.all(np.isnan(dosage)):
+            # nothing to do
+            continue
+
+        mean_val = np.nanmean(dosage)
+        if np.isnan(mean_val):
+            continue
+        dosage[np.isnan(dosage)] = mean_val
+
+        key = snp_pos if snp_pos is not None else snp_name
+        try:
+            key_i = int(key)
+        except Exception:
+            key_i = key
+        gen_dict[key_i] = dosage
+        # also map by SNP name (rsid) when available
+        try:
+            gen_dict[str(snp_name)] = dosage
+        except Exception:
+            pass
+        # also map by chrom:pos:ref:alt when allele ids and chrom/pos present
+        try:
+            if allele_ids is not None and snp_pos is not None and chrom_val is not None:
+                parts = str(allele_ids).split(',')
+                if len(parts) >= 2:
+                    ref = parts[0]
+                    alt = parts[1]
+                    varid = f"{str(chrom_val).replace('chr','')}:{int(snp_pos)}:{ref}:{alt}"
+                    gen_dict[varid] = dosage
+        except Exception:
+            pass
+        # also map by SNP name (rsid) for easier matching when variant IDs use rsids
+        try:
+            gen_dict[str(snp_name)] = dosage
+        except Exception:
+            pass
+
+    return gen_dict
+
+
+def get_genotype_data_plink1(plink_prefix):
+    """
+    Read PLINK1 files (.bed/.bim/.fam) and return normalized `bim` and `fam` DataFrames.
+
+    Parameters:
+    plink_prefix (str): Path prefix to the PLINK files (without extension).
+
+    Returns:
+    tuple: (bim, fam) where `bim` is a DataFrame with columns ['snp','chrom','pos','allele_ids','nalleles','i']
+           and `fam` is a DataFrame with columns ['fid','iid','father','mother','sex','phenotype']
+    """
+    import math
+
+    bim_path = plink_prefix + '.bim'
+    fam_path = plink_prefix + '.fam'
+
+    # read bim
+    try:
+        bim_df = pd.read_csv(bim_path, sep='\t', header=None, dtype=str)
+    except Exception as e:
+        raise IOError('Could not read BIM file {}: {}'.format(bim_path, e))
+
+    # BIM expected to have at least 6 columns: chrom, snp, cm, pos, a1, a2
+    if bim_df.shape[1] < 6:
+        raise IOError('BIM file {} does not have expected 6 columns'.format(bim_path))
+
+    bim_df = bim_df.iloc[:, :6]
+    bim_df.columns = ['chrom', 'snp', 'cm', 'pos', 'a1', 'a2']
+
+    bim = pd.DataFrame({
+        'snp': bim_df['snp'].astype(str),
+        'chrom': bim_df['chrom'].astype(str),
+        'pos': pd.to_numeric(bim_df['pos'], errors='coerce').fillna(0).astype(int),
+        'allele_ids': (bim_df['a1'].astype(str) + ',' + bim_df['a2'].astype(str)),
+        'nalleles': 2,
+        'i': range(len(bim_df))
+    })
+    bim.index = bim['snp'].astype(str)
+    bim.index.name = 'candidate'
+
+    # read fam
+    try:
+        fam_df = pd.read_csv(fam_path, sep=r'\s+', header=None, dtype=str)
+    except Exception as e:
+        raise IOError('Could not read FAM file {}: {}'.format(fam_path, e))
+
+    # FAM should have 6 columns
+    if fam_df.shape[1] < 6:
+        # pad with placeholders
+        cols = fam_df.shape[1]
+        for i in range(cols, 6):
+            fam_df[i] = 0
+
+    fam_df = fam_df.iloc[:, :6]
+    fam_df.columns = ['fid', 'iid', 'father', 'mother', 'sex', 'phenotype']
+
+    fam = fam_df.copy()
+
+    return bim, fam
+
+
+def plink_to_genotypes(bim, fam, bed_path, CHROM=None, sample_ids=None, genpos_dict=None):
+    """
+    Convert PLINK1 .bed/.bim/.fam into gen_dict mapping position->dosage array (samples in fam order).
+
+    This implementation supports SNP-major .bed files (the default PLINK mode). It decodes two-bit
+    codes per sample and maps them to dosages: 0->0, 1->1, 2->2, 3->missing (NaN). Missing values
+    are imputed with the per-variant mean.
+
+    Parameters:
+    bim (pd.DataFrame): DataFrame produced by get_genotype_data_plink1
+    fam (pd.DataFrame): DataFrame produced by get_genotype_data_plink1
+    bed_path (str): Path to the .bed file
+    CHROM (str): optional chromosome filter
+    sample_ids (list): optional sample subset to keep (IID column values)
+    genpos_dict (dict): optional mapping variant_id->position to further filter variants
+
+    Returns:
+    dict: mapping of variant position (int) or name -> numpy array of dosages
+    """
+    gen_dict = {}
+
+    # normalize sample selection
+    n_samples = len(fam)
+    fam_iids = list(fam['iid'].astype(str))
+    if sample_ids is not None:
+        ix = [fam_iids.index(s) for s in sample_ids if s in fam_iids]
+    else:
+        ix = None
+
+    # determine which SNPs to read (and their order) from bim
+    chrom_filter = None
+    if CHROM is not None:
+        chrom_filter = str(CHROM).replace('chr', '')
+
+    # prepare selected indices; include allele ids and chrom so we can build chr:pos:ref:alt keys
+    selected_rows = []
+    for idx, row in bim.iterrows():
+        chrom = str(row['chrom']).replace('chr', '')
+        snp_name = str(row['snp'])
+        pos = row['pos']
+        allele_ids = row['allele_ids'] if 'allele_ids' in row.index else None
+        if chrom_filter is not None and chrom != chrom_filter:
+            continue
+        if genpos_dict is not None and snp_name not in genpos_dict:
+            continue
+        selected_rows.append((int(row['i']), snp_name, pos, chrom, allele_ids))
+
+    # open bed file and verify header
+    try:
+        fh = open(bed_path, 'rb')
+    except Exception as e:
+        raise IOError('Could not open BED file {}: {}'.format(bed_path, e))
+
+    header = fh.read(3)
+    if len(header) < 3:
+        fh.close()
+        raise IOError('BED file {} is too short'.format(bed_path))
+
+    # plink magic: first two bytes 0x6c 0x1b, third byte indicates mode (1 == SNP-major)
+    if header[0] != 0x6c or header[1] != 0x1b:
+        fh.close()
+        raise IOError('Not a PLINK BED file: {}'.format(bed_path))
+
+    mode = header[2]
+    if mode != 1:
+        fh.close()
+        raise IOError('Only SNP-major BED files are supported (mode byte != 1). Found mode={}'.format(mode))
+
+    # bytes per SNP
+    bytes_per_snp = int(np.ceil(n_samples / 4.0))
+
+    # iterate through SNPs in file order; PLINK stores in same order as BIM
+    # We'll step through the bed file reading bytes_per_snp for each SNP,
+    # and only keep those SNPs that are in selected_rows (by index i)
+    # Build a mapping from SNP index -> (name,pos) for quick lookup
+    sel_map = {i: (name, pos, chrom, allele_ids) for (i, name, pos, chrom, allele_ids) in selected_rows}
+
+    # iterate SNPs
+    snp_idx = 0
+    # read sequentially
+    try:
+        while snp_idx < len(bim):
+            chunk = fh.read(bytes_per_snp)
+            if not chunk:
+                break
+            if snp_idx in sel_map:
+                name, pos, chrom_val, allele_ids = sel_map[snp_idx]
+                # decode chunk into per-sample two-bit codes
+                codes = np.empty(n_samples, dtype=np.uint8)
+                codes.fill(3)  # default to missing
+                out_i = 0
+                for byte in chunk:
+                    for k in range(4):
+                        if out_i >= n_samples:
+                            break
+                        code = (byte >> (2 * k)) & 0x3
+                        codes[out_i] = code
+                        out_i += 1
+
+                # map codes to dosage: 0->0,1->1,2->2,3->nan
+                dosage = np.empty(n_samples, dtype=float)
+                dosage[:] = np.nan
+                # mapping: code 0 => 0, code 1 => 1, code 2 => 2
+                mask0 = codes == 0
+                mask1 = codes == 1
+                mask2 = codes == 2
+                dosage[mask0] = 0.0
+                dosage[mask1] = 1.0
+                dosage[mask2] = 2.0
+
+                # subset samples if requested
+                if ix is not None:
+                    dosage = dosage[ix]
+
+                # impute missing with mean
+                if np.all(np.isnan(dosage)):
+                    # skip variants with all missing
+                    pass
+                else:
+                    mean_val = np.nanmean(dosage)
+                    dosage[np.isnan(dosage)] = mean_val
+                    key = pos if (pos is not None and not pd.isna(pos) and pos != 0) else name
+                    try:
+                        key_i = int(key)
+                    except Exception:
+                        key_i = key
+                    # store dosage under integer position (if available) and under SNP name for rsid matching
+                    gen_dict[key_i] = dosage
+                    try:
+                        gen_dict[str(name)] = dosage
+                    except Exception:
+                        pass
+                    # also map by chrom:pos:ref:alt when possible
+                    try:
+                        if allele_ids is not None and pos is not None and chrom_val is not None:
+                            parts = str(allele_ids).split(',')
+                            if len(parts) >= 2:
+                                ref = parts[0]
+                                alt = parts[1]
+                                varid = f"{str(chrom_val).replace('chr','')}:{int(pos)}:{ref}:{alt}"
+                                gen_dict[varid] = dosage
+                    except Exception:
+                        pass
+
+            snp_idx += 1
+    finally:
+        fh.close()
+
+    return gen_dict
+
+def make_test_dict_matrixqtl(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist=None, pvalue_column=None, genchrom_dict=None, CHROM=None):
     """
     Create a dictionary of SNP-gene tests from a QTL file and return the file header.
     
@@ -371,6 +719,11 @@ def make_test_dict(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist=None, pv
         line = line.rstrip().split()
         # check if the variant, in the first column, is one for which we have the genotype position
         if line[0] in genpos_dict:
+            # optional chromosome filter (requires genchrom_dict)
+            if CHROM is not None and genchrom_dict is not None:
+                vchrom = genchrom_dict.get(line[0])
+                if vchrom is None or str(vchrom).replace('chr','') != str(CHROM).replace('chr',''):
+                    continue
             # extract the position of the variant
             snp = genpos_dict[line[0]]
             # the phenotype is the second column in the file
@@ -406,7 +759,7 @@ def make_test_dict(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist=None, pv
     # return the dictionary and the header of the file
     return test_dict, "\t".join(header)
 
-def make_test_dict_tensorqtl(QTL_fh, genpos_dict, cis_dist=None, group_size_s=None):
+def make_test_dict_tensorqtl(QTL_fh, genpos_dict, cis_dist=None, group_size_s=None, genchrom_dict=None, CHROM=None):
     """
     Create a dictionary of SNP-gene tests from a tensorQTL file and return the file header.
     
@@ -423,6 +776,14 @@ def make_test_dict_tensorqtl(QTL_fh, genpos_dict, cis_dist=None, group_size_s=No
     
     # load the tensorQTL output
     qtl_df = load_tensorqtl_output(QTL_fh, group_size_s=group_size_s)
+    # chromosome filter if requested
+    if CHROM is not None:
+        chrom_str = str(CHROM).replace('chr','')
+        if 'chrom' in qtl_df.columns:
+            qtl_df = qtl_df[qtl_df['chrom'].astype(str).str.replace('chr','') == chrom_str]
+        else:
+            # try to parse chromosome from variant_id (prefix before ':')
+            qtl_df = qtl_df[qtl_df['variant_id'].astype(str).apply(lambda x: str(x).split(':')[0].replace('chr','') == chrom_str)]
     # filter so that the variant-feature pairs are within the given cis distance
     if cis_dist is not None:
         qtl_df = qtl_df[qtl_df['tss_distance'].abs()<=cis_dist]
@@ -453,7 +814,7 @@ def make_test_dict_tensorqtl(QTL_fh, genpos_dict, cis_dist=None, group_size_s=No
     # return the dictionary and the header of the file
     return test_dict, '\t'.join(qtl_df.columns)
 
-def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist=None, pvalue_column=None, variant_index_col=0, feature_index_col=1):
+def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist=None, pvalue_column=None, variant_col='variant_id', feature_col='feature_id', genchrom_dict=None, CHROM=None):
     """
     Create a dictionary of SNP-gene tests from a QTL file, assuming the genotype matrix and position file
     are separate from those used in the Matrix-eQTL run. This function is used with the external option
@@ -477,6 +838,20 @@ def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist
     QTL = open_file(QTL_fh)
     # split the header based on whitespace
     header = QTL.readline().rstrip().split()
+    # resolve variant and feature columns (accept either int index or string column name)
+    def _resolve_col(col, header, default_name):
+        if isinstance(col, int):
+            return col
+        if isinstance(col, str):
+            if col in header:
+                return header.index(col)
+            else:
+                sys.exit(''.join(["Cannot find supplied column in the tests file: ", col]))
+        # fallback
+        return header.index(default_name) if default_name in header else 0
+
+    variant_index_col = _resolve_col(variant_col, header, 'variant_id')
+    feature_index_col = _resolve_col(feature_col, header, 'feature_id')
     # check if the p value column was supplied
     if pvalue_column is not None:
         # and if it is actually present in the file
@@ -512,6 +887,11 @@ def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist
         line = line.rstrip().split()
         # check if the first column, the variant, is in the dictionary of genomic positions
         if line[variant_index_col] in genpos_dict:
+            # chromosome filter if requested
+            if CHROM is not None and genchrom_dict is not None:
+                vchrom = genchrom_dict.get(line[variant_index_col])
+                if vchrom is None or str(vchrom).replace('chr','') != str(CHROM).replace('chr',''):
+                    continue
             # get the position of the variant
             snp = genpos_dict[line[variant_index_col]]
             # get the phenotype from the line, in the second column
@@ -555,7 +935,257 @@ def make_test_dict_external(QTL_fh, gen_dict, genpos_dict, phepos_dict, cis_dist
         test_dict[gene]['snps'] = snps[is_in_cis_start | is_in_cis_end]
     return test_dict, "\t".join(header)
 
-def make_test_dict_limix(QTL_fh, cis_dist=None):
+
+def get_variants_from_qtl_file(QTL_fh, variant_col='variant_id', genchrom_dict=None, CHROM=None):
+    """
+    Extract unique variant identifiers from a QTL summary file.
+
+    Supports plain-text QTL files (whitespace-separated) and Parquet files (tensorQTL output).
+
+    Parameters:
+    QTL_fh (str): Path to the QTL file (.txt/.gz/.parquet).
+    variant_index_col (int): Column index (0-based) for the variant identifier in text files.
+
+    Returns:
+    list: Sorted list of unique variant identifiers (strings).
+    """
+    # Parquet (tensorQTL) case
+    if isinstance(QTL_fh, str) and QTL_fh.endswith('.parquet'):
+        try:
+            df = pd.read_parquet(QTL_fh)
+            # if variant_col is a string, try to use that column name
+            if isinstance(variant_col, str) and variant_col in df.columns:
+                vals = pd.unique(df[variant_col]).tolist()
+                # apply chromosome/genchrom filtering if requested
+                if CHROM is not None:
+                    if genchrom_dict is not None:
+                        vals = [v for v in vals if v in genchrom_dict and str(genchrom_dict[v]).replace('chr', '') == str(CHROM).replace('chr', '')]
+                    else:
+                        # try to find a chrom column for variants in dataframe
+                        chrom_cols = [c for c in df.columns if 'chrom' in c.lower() or 'chr' in c.lower()]
+                        if chrom_cols:
+                            chrom_col = chrom_cols[0]
+                            # map variant->chrom using dataframe
+                            variant_to_chrom = dict(zip(df[variant_col].astype(str), df[chrom_col].astype(str)))
+                            vals = [v for v in vals if v in variant_to_chrom and str(variant_to_chrom[v]).replace('chr', '') == str(CHROM).replace('chr', '')]
+                return sorted(vals)
+            # if variant_col is an int, use positional column
+            if isinstance(variant_col, int) and variant_col < len(df.columns):
+                colname = df.columns[variant_col]
+                vals = pd.unique(df[colname]).tolist()
+                if CHROM is not None:
+                    if genchrom_dict is not None:
+                        vals = [v for v in vals if v in genchrom_dict and str(genchrom_dict[v]).replace('chr', '') == str(CHROM).replace('chr', '')]
+                return sorted(vals)
+            # fallback: try common column name
+            if 'variant_id' in df.columns:
+                return sorted(pd.unique(df['variant_id']).tolist())
+            return []
+        except Exception:
+            return []
+
+    # Plain text (possibly gzipped)
+    variants = set()
+    fh = open_file(QTL_fh)
+    header = fh.readline().rstrip().split()
+
+    # resolve variant column index for text file
+    if isinstance(variant_col, int):
+        variant_index = variant_col
+    else:
+        if variant_col in header:
+            variant_index = header.index(variant_col)
+        else:
+            # fallback to first column
+            variant_index = 0
+
+    # try to find a chromosome column in the header for text QTL files
+    chrom_index = None
+    for colname in ('snp_chromosome', 'snp_chrom', 'variant_chromosome', 'variant_chrom', 'chrom'):
+        if colname in header:
+            chrom_index = header.index(colname)
+            break
+
+    for line in fh:
+        parts = line.rstrip().split()
+        if len(parts) <= variant_index:
+            continue
+        v = parts[variant_index]
+        # apply chrom/genchrom filtering if requested
+        if CHROM is not None:
+            ok = True
+            if genchrom_dict is not None:
+                if v not in genchrom_dict or str(genchrom_dict[v]).replace('chr', '') != str(CHROM).replace('chr', ''):
+                    ok = False
+            elif chrom_index is not None and len(parts) > chrom_index:
+                if str(parts[chrom_index]).replace('chr', '') != str(CHROM).replace('chr', ''):
+                    ok = False
+            if not ok:
+                continue
+        variants.add(v)
+    fh.close()
+    return sorted(list(variants))
+
+
+def get_variants_from_limix_h5(QTL_h5_path, genchrom_dict=None, CHROM=None):
+    """
+    Extract unique variant identifiers from a LIMIX H5 chunked QTL output file.
+
+    Parameters:
+    QTL_h5_path (str): Path to the LIMIX H5 file.
+
+    Returns:
+    list: Sorted list of unique variant identifiers (strings).
+    """
+    vs = set()
+    try:
+        h5fh = h5py.File(QTL_h5_path, 'r')
+        for feature in h5fh.keys():
+            if 'snp_id' in h5fh[feature].keys():
+                arr = h5fh[feature]['snp_id']
+                # if CHROM requested, check if per-feature snp_chromosome dataset exists
+                have_snp_chrom = 'snp_chromosome' in h5fh[feature]
+                for i, v in enumerate(arr):
+                    # decode bytes to str if necessary
+                    try:
+                        vid = v.decode('utf-8')
+                    except Exception:
+                        vid = str(v)
+                    if CHROM is not None:
+                        ok = True
+                        if have_snp_chrom:
+                            try:
+                                sc = h5fh[feature]['snp_chromosome'][i]
+                                if isinstance(sc, (bytes, bytearray)):
+                                    sc = sc.decode('utf-8')
+                                if str(sc).replace('chr', '') != str(CHROM).replace('chr', ''):
+                                    ok = False
+                            except Exception:
+                                pass
+                        elif genchrom_dict is not None:
+                            if vid not in genchrom_dict or str(genchrom_dict[vid]).replace('chr', '') != str(CHROM).replace('chr', ''):
+                                ok = False
+                        if not ok:
+                            continue
+                    vs.add(vid)
+        h5fh.close()
+    except Exception:
+        # On error, return empty list
+        return []
+    return sorted(vs)
+
+
+def get_phepos_from_limix_file(QTL_fh, CHROM=None):
+    """
+    Extract phenotype positions from a LIMIX text QTL file.
+
+    Parameters:
+    QTL_fh (str): Path to the LIMIX text output file (possibly gzipped).
+    CHROM (str): optional chromosome filter for phenotypes (matches feature_chromosome column if present).
+
+    Returns:
+    dict: mapping feature_id -> numpy.array([start, end], dtype=float)
+    """
+    phepos = {}
+    fh = open_file(QTL_fh)
+    header = fh.readline().rstrip().split()
+    # required columns
+    if 'feature_id' not in header or ('feature_start' not in header and 'feature_start' not in header):
+        # try common alternatives
+        if 'phenotype_id' in header and 'feature_start' in header:
+            pass
+    # find indexes
+    try:
+        feature_idx = header.index('feature_id')
+    except ValueError:
+        # try phenotype_id
+        feature_idx = header.index('phenotype_id') if 'phenotype_id' in header else None
+    # start/end
+    start_idx = header.index('feature_start') if 'feature_start' in header else (header.index('start') if 'start' in header else None)
+    end_idx = header.index('feature_end') if 'feature_end' in header else (header.index('end') if 'end' in header else None)
+    chrom_idx = header.index('feature_chromosome') if 'feature_chromosome' in header else (header.index('chrom') if 'chrom' in header else None)
+
+    if feature_idx is None or start_idx is None or end_idx is None:
+        fh.close()
+        return {}
+
+    for line in fh:
+        parts = line.rstrip().split()
+        if len(parts) <= max(feature_idx, start_idx, end_idx):
+            continue
+        feat = parts[feature_idx]
+        try:
+            s = float(parts[start_idx])
+            e = float(parts[end_idx])
+        except Exception:
+            continue
+        if CHROM is not None and chrom_idx is not None:
+            if str(parts[chrom_idx]).replace('chr', '') != str(CHROM).replace('chr', ''):
+                continue
+        phepos[feat] = np.array([s, e], dtype=np.float64)
+    fh.close()
+    return phepos
+
+
+def get_phepos_from_limix_h5(QTL_h5_path, CHROM=None):
+    """
+    Extract phenotype positions from a LIMIX H5 chunked QTL output file.
+
+    Parameters:
+    QTL_h5_path (str): Path to the LIMIX H5 file.
+    CHROM (str): optional chromosome filter (matches 'feature_chromosome' dataset or attribute if present).
+
+    Returns:
+    dict: mapping feature_id -> numpy.array([start, end], dtype=float)
+    """
+    phepos = {}
+    try:
+        h5fh = h5py.File(QTL_h5_path, 'r')
+    except Exception:
+        return {}
+
+    for feature in h5fh.keys():
+        grp = h5fh[feature]
+        # attempt datasets first
+        s = None
+        e = None
+        chrom = None
+        if 'feature_start' in grp:
+            s = grp['feature_start'][()]
+        if 'feature_end' in grp:
+            e = grp['feature_end'][()]
+        if 'feature_chromosome' in grp:
+            chrom = grp['feature_chromosome'][()]
+        # try attributes
+        if s is None and 'feature_start' in grp.attrs:
+            s = grp.attrs.get('feature_start')
+        if e is None and 'feature_end' in grp.attrs:
+            e = grp.attrs.get('feature_end')
+        if chrom is None and 'feature_chromosome' in grp.attrs:
+            chrom = grp.attrs.get('feature_chromosome')
+
+        # decode bytes if needed
+        try:
+            if isinstance(s, (bytes, bytearray)):
+                s = float(s.decode('utf-8'))
+            if isinstance(e, (bytes, bytearray)):
+                e = float(e.decode('utf-8'))
+            if isinstance(chrom, (bytes, bytearray)):
+                chrom = chrom.decode('utf-8')
+        except Exception:
+            pass
+
+        if s is None or e is None:
+            continue
+        if CHROM is not None and chrom is not None:
+            if str(chrom).replace('chr', '') != str(CHROM).replace('chr', ''):
+                continue
+        phepos[feature] = np.array([float(s), float(e)], dtype=np.float64)
+
+    h5fh.close()
+    return phepos
+
+def make_test_dict_limix(QTL_fh, cis_dist=None, genchrom_dict=None, CHROM=None):
     """
     Processes QTL data to create dictionaries of genomic and phenotypic positions, and a dictionary of test results.
 
@@ -588,9 +1218,9 @@ def make_test_dict_limix(QTL_fh, cis_dist=None):
     """
     
     # for the limix output, the feature column is actually the first column
-    feature_index_col = 0
+    #feature_index_col = 0
     # and the variant is the second one
-    variant_index_col = 1
+    #variant_index_col = 1
     # and the p-value columns is this
     pvalue_column = 'p_value'
     # read the QTL filehandle that was supplied
@@ -632,14 +1262,13 @@ def make_test_dict_limix(QTL_fh, cis_dist=None):
     genpos_dict = {}
     phepos_dict = {}
 
-    # get indices of each column
-    feature_id_index = header.index('feature_id')
-    snp_id_index = header.index('snp_id')
-    feature_chromosome_index = header.index('feature_chromosome')
-    feature_start_index = header.index('feature_start')
-    feature_end_index = header.index('feature_end')
-    snp_chromosome_index = header.index('snp_chromosome')
-    snp_position_index = header.index('snp_position')
+    # get indices of each column (if present)
+    feature_id_index = header.index('feature_id') if 'feature_id' in header else None
+    snp_id_index = header.index('snp_id') if 'snp_id' in header else None
+    feature_start_index = header.index('feature_start') if 'feature_start' in header else None
+    feature_end_index = header.index('feature_end') if 'feature_end' in header else None
+    snp_position_index = header.index('snp_position') if 'snp_position' in header else None
+    snp_chromosome_index = header.index('snp_chromosome') if 'snp_chromosome' in header else None
     
     # check each line in the QTL output
     for line in QTL:
@@ -647,42 +1276,81 @@ def make_test_dict_limix(QTL_fh, cis_dist=None):
         # feature_id,snp_id,p_value,beta,beta_se,empirical_feature_p_value,feature_chromosome,feature_start,feature_end,ENSG,biotype,n_samples,n_e_samples,snp_chromosome,snp_position,assessed_allele,call_rate,maf,hwe_p
         # remove trailing newline, and split by whitespace
         line = line.rstrip().split()
-        # grab the values
-        variant = line[snp_id_index]
-        feature = line[feature_id_index]
-        p_value = line[pvalIndex]
-        feature_pos = [line[feature_start_index], line[feature_end_index]]
-        var_pos = line[snp_position_index]
-        # put the variant position in the dictionary
-        genpos_dict[variant] = var_pos
-        # features positions too
-        phepos_dict[feature] = feature_pos
-        # check the absolute distance of the variant to the flanks of the phenotype, and take the closest, so the smallest value
-        distance = min(abs(feature_pos - var_pos))
+        # grab the values (defensive: some columns may be missing)
+        try:
+            variant = line[snp_id_index] if snp_id_index is not None else None
+            feature = line[feature_id_index] if feature_id_index is not None else None
+            p_value = line[pvalIndex]
+        except Exception:
+            continue
+        # parse feature start/end and variant position as numeric values; skip malformed lines
+        try:
+            feature_pos = np.array([float(line[feature_start_index]), float(line[feature_end_index])], dtype=np.float64) if feature_start_index is not None and feature_end_index is not None else None
+        except Exception:
+            continue
+        try:
+            var_pos = float(line[snp_position_index]) if snp_position_index is not None else None
+        except Exception:
+            continue
+        # coerce variant position to an int when appropriate and add positions
+        if var_pos is not None:
+            try:
+                # if var_pos is an integer value, store as int for consistency with PLINK keys
+                if float(var_pos).is_integer():
+                    var_pos_key = int(float(var_pos))
+                else:
+                    var_pos_key = float(var_pos)
+            except Exception:
+                var_pos_key = var_pos
+            if variant is not None:
+                genpos_dict[variant] = var_pos_key
+        if feature is not None and feature_pos is not None:
+            phepos_dict[feature] = feature_pos
+        # apply CHROM filtering if requested; try snp_chromosome field first, then genchrom_dict if available
+        if CHROM is not None:
+            keep = True
+            if snp_chromosome_index is not None and len(line) > snp_chromosome_index:
+                try:
+                    sc = str(line[snp_chromosome_index]).replace('chr', '')
+                    if sc != str(CHROM).replace('chr', ''):
+                        keep = False
+                except Exception:
+                    pass
+            elif genchrom_dict is not None and variant is not None:
+                if variant in genchrom_dict:
+                    try:
+                        sc = str(genchrom_dict[variant]).replace('chr', '')
+                        if sc != str(CHROM).replace('chr', ''):
+                            keep = False
+                    except Exception:
+                        pass
+            if not keep:
+                continue
+        # check the absolute distance of the variant to the flanks of the phenotype, and take the closest
+        if feature_pos is None or var_pos is None:
+            continue
+        distance = float(np.min(np.abs(feature_pos - var_pos)))
         # check if we are filtering by distance, and if this distance is within the cis window
         if cis_dist is None or distance <= cis_dist:
             # convert to a float
             pval = float(p_value)
             # check if this is the first time we encounter this gne
-            if gene not in test_dict:
+            if feature not in test_dict:
                 # if so, add it to the dictionary
-                test_dict[gene] = {'snps' : [snp], 'best_snp' : var_pos, 'pval' : pval, 'line' : '\t'.join(line)}
+                test_dict[feature] = {'snps' : [var_pos_key], 'best_snp' : var_pos_key, 'pval' : pval, 'line' : '\t'.join(line)}
             else:
                 # if not, then check if the variant is more significant that the current best hit
-                if pval < test_dict[gene]['pval']:
+                if pval < test_dict[feature]['pval']:
                     # if so, update the parameters describing the best hit
-                    test_dict[gene]['best_snp'] = var_pos
-                    test_dict[gene]['pval'] = pval
-                    test_dict[gene]['line'] = '\t'.join(line)
+                    test_dict[feature]['best_snp'] = var_pos_key
+                    test_dict[feature]['pval'] = pval
+                    test_dict[feature]['line'] = '\t'.join(line)
                 # and add the location of this variant to the list of variants tested for this feature
-                test_dict[gene]['snps'].append(var_pos)
+                test_dict[feature]['snps'].append(var_pos_key)
     QTL.close()
     return genpos_dict, phepos_dict, test_dict, "\t".join(header)
         
-        
-    
-
-def make_test_dict_limix_h5(QTL_h5_path, genpos_dict, phepos_dict, cis_dist=None):
+def make_test_dict_limix_h5(QTL_h5_path, genpos_dict, phepos_dict, cis_dist=None, genchrom_dict=None, CHROM=None):
     """
     Processes QTL data from an HDF5 file to create a dictionary of test results.
 
@@ -731,8 +1399,37 @@ def make_test_dict_limix_h5(QTL_h5_path, genpos_dict, phepos_dict, cis_dist=None
         phepos = phepos_dict[feature]
         # check each variant
         for i in range(0, len(vars_feature)):
+            # decode variant id
+            try:
+                var_id = vars_feature[i].decode("utf-8")
+            except Exception:
+                var_id = str(vars_feature[i])
+            # if CHROM filter requested, try to use snp_chromosome dataset if present or genchrom_dict
+            if CHROM is not None:
+                chrom_ok = True
+                if 'snp_chromosome' in h5_fh[feature]:
+                    try:
+                        sc = h5_fh[feature]['snp_chromosome'][i]
+                        if isinstance(sc, (bytes, bytearray)):
+                            sc = sc.decode('utf-8')
+                        if str(sc).replace('chr', '') != str(CHROM).replace('chr', ''):
+                            chrom_ok = False
+                    except Exception:
+                        pass
+                elif genchrom_dict is not None and var_id in genchrom_dict:
+                    try:
+                        sc = str(genchrom_dict[var_id]).replace('chr', '')
+                        if sc != str(CHROM).replace('chr', ''):
+                            chrom_ok = False
+                    except Exception:
+                        pass
+                if not chrom_ok:
+                    continue
             # get the position of the variant
-            genpos = genpos_dict[vars_feature[i].decode("utf-8")]
+            genpos = genpos_dict.get(var_id)
+            if genpos is None:
+                # skip variants without position information
+                continue
             # if we do cis filtering, check cis distance
             if cis_dist is not None:
                 # check the absolute distance of the variant to the flanks of the phenotype, and take the closest, so the smallest value
@@ -748,7 +1445,7 @@ def make_test_dict_limix_h5(QTL_h5_path, genpos_dict, phepos_dict, cis_dist=None
                     else:
                         
                         # otherwise, check if this variant was more significant than the current most significant p-value for this feature
-                        if pval < test_dict[gene]['pval']:
+                        if pval < test_dict[feature]['pval']:
                             # if so, update for the best variant info to have this variants information
                             test_dict[feature]['best_snp'] = genpos
                             test_dict[feature]['pval'] = pval
@@ -774,7 +1471,7 @@ def make_test_dict_limix_h5(QTL_h5_path, genpos_dict, phepos_dict, cis_dist=None
     # return the dictionary and the header of the file
     return test_dict, "\t".join(['feature', 'chromStart', 'chromEnd'])
 
-def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var_thresh, window):
+def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var_thresh, window, tmp_dir=None):
     """
     Process a dictionary of SNP-gene tests to calculate the effective Bonferroni correction number.
     
@@ -798,14 +1495,19 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
     
     # open the output file for writing
     OUT = open(OUT_fh, 'w')
-    # write the header to the file
-    OUT.write(input_header + '\tBF\tTESTS\n')
+    # write the header to the file (add grand-total p-value and grand-total test count columns)
+    OUT.write(input_header + '\tfeature_eigen_p\tfeature_n_tests\tglobal_eigen_p\tglobal_n_tests\n')
     # keep track of how many phenotypes we have processeds
     counter = 1.0
     # get the genes we are looking at from the dictionary
     genes = test_dict.keys()
     # get the number of genes we are looking at
     numgenes = len(genes)
+    # buffer per-gene results to a temporary JSON-lines file to avoid holding many objects in memory
+    # choose directory for temp file; if tmp_dir is None, let NamedTemporaryFile pick the system temp dir
+    tmp_dir_arg = tmp_dir if tmp_dir else None
+    tmpfh = tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='eigenmt_tmp_', dir=tmp_dir_arg)
+    tmp_name = tmpfh.name
     # save the start positions of each phenotype
     TSSs = []
     # check each phenotype and add to the start position of each feature
@@ -813,6 +1515,22 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
         TSSs.append(phepos_dict[gene][0])
     # now sort both the start positions of the features and the features based on the start position (ascending)
     TSSs, genes = [list(x) for x in zip(*sorted(zip(TSSs, genes), key=lambda p: p[0]))]
+    # build reverse mapping from position -> variant ids (rsids) using genpos_dict if available
+    pos_to_rsids = {}
+    try:
+        gpd = globals().get('genpos_dict', None)
+        if gpd:
+            for vid, p in gpd.items():
+                try:
+                    pi = int(p)
+                except Exception:
+                    try:
+                        pi = int(float(p))
+                    except Exception:
+                        continue
+                pos_to_rsids.setdefault(pi, []).append(str(vid))
+    except Exception:
+        pos_to_rsids = {}
     # check each phenotype
     for gene in genes:
         # calculate the percentage of features we have processed
@@ -824,6 +1542,56 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
         counter += 1
         # sort the variants associated with this feature, by their genomic position (the values in the list 'snps')
         snps = np.sort(test_dict[gene]['snps'])
+        # quick diagnostics: how many of the listed snps have genotype data (prefer rsid matches)
+        try:
+            n_listed = len(snps)
+            n_present = 0
+            n_present_rsid = 0
+            for s in snps:
+                found = False
+                try:
+                    si = int(s)
+                except Exception:
+                    si = None
+                # try rsids mapped to this position first
+                if si is not None and si in pos_to_rsids:
+                    for rs in pos_to_rsids[si]:
+                        if rs in gen_dict:
+                            found = True
+                            n_present_rsid += 1
+                            break
+                # fallback to direct key lookup (pos or string)
+                if not found:
+                    if s in gen_dict:
+                        found = True
+                    elif si is not None and si in gen_dict:
+                        found = True
+                if found:
+                    n_present += 1
+        except Exception:
+            n_listed = 0
+            n_present = 0
+            n_present_rsid = 0
+        if n_present == 0:
+            print('Warning: gene {} has {} listed snps but 0 present in genotypes; TESTS will be 0'.format(gene, n_listed), file=sys.stderr)
+        else:
+            try:
+                # if n_present_rsid > 0:
+                #     print(f'Note: gene {gene} matched {n_present_rsid} variants by rsid and {n_present - n_present_rsid} by position', flush=True)
+                # calculate how many variants could not be matched by rsid
+                n_by_position = n_present - n_present_rsid
+                # warn about this
+                if n_by_position > 0:
+                    print(f'Warning: gene {gene} has {n_by_position} variant(s) matched only by position; ensure these are correct.', file=sys.stderr)
+            except Exception:
+                pass
+        # compute how many listed variants are missing from genotypes
+        try:
+            missing_variants = max(0, n_listed - n_present)
+        except Exception:
+            missing_variants = 0
+        if missing_variants > 0:
+            print(f'Warning: gene {gene} has {missing_variants} variant(s) missing from genotype data; these will be counted as single tests.', file=sys.stderr)
         # start at zero
         start = 0
         # stop at the end of the end of the max window size for the variants
@@ -842,17 +1610,111 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
                 break ##can't compute eigenvalues for a scalar, so add 1 to m_eff and break from the while loop
             # get all the variant positions that are in the window
             snps_window = snps[start:stop]
-            # we'll keep track of the genotypes of all variants in this window
-            genotypes = []
-            # check each variant position in this window
+            # gather genotype arrays for variants in this window
+            rows = []
+            lengths = []
             for snp in snps_window:
-                # if we have genotype information for the variant at this window, add it to the list (of lists)
+                row_added = False
+                try:
+                    s_pos = int(snp)
+                except Exception:
+                    s_pos = None
+                # try rsids mapped to this position first
+                if s_pos is not None and s_pos in pos_to_rsids:
+                    for rs in pos_to_rsids[s_pos]:
+                        if rs in gen_dict:
+                            arr = gen_dict[rs]
+                            arr = np.asarray(arr)
+                            rows.append(arr)
+                            lengths.append(arr.shape[0])
+                            row_added = True
+                            break
+                if row_added:
+                    continue
+                # try exact string keys (chr:pos:ref:alt) by searching for a prefix if genchrom_dict available
+                try:
+                    if s_pos is not None and 'genchrom_dict' in globals() and globals().get('genchrom_dict') is not None:
+                        genchrom = globals().get('genchrom_dict')
+                        # iterate rsids to get chrom
+                        if s_pos in pos_to_rsids:
+                            for rs in pos_to_rsids[s_pos]:
+                                chrom = genchrom.get(rs)
+                                if chrom is None:
+                                    continue
+                                prefix = f"{str(chrom).replace('chr','')}:{s_pos}:"
+                                for k in gen_dict.keys():
+                                    if isinstance(k, str) and k.startswith(prefix) and len(k.split(':')) >= 4:
+                                        arr = gen_dict[k]
+                                        arr = np.asarray(arr)
+                                        rows.append(arr)
+                                        lengths.append(arr.shape[0])
+                                        row_added = True
+                                        break
+                                if row_added:
+                                    break
+                except Exception:
+                    pass
+                if row_added:
+                    continue
+                # fallback: numeric or direct key
                 if snp in gen_dict:
-                    genotypes.append(gen_dict[snp])
-            # convert the doublet list into a double array
-            genotypes = np.asarray(genotypes)
+                    arr = gen_dict[snp]
+                    arr = np.asarray(arr)
+                    rows.append(arr)
+                    lengths.append(arr.shape[0])
+                elif s_pos is not None and s_pos in gen_dict:
+                    arr = gen_dict[s_pos]
+                    arr = np.asarray(arr)
+                    rows.append(arr)
+                    lengths.append(arr.shape[0])
+            # diagnostic: if we have rows but lengths vary, report a brief warning
+            if len(rows) > 0 and len(set(lengths)) > 1:
+                print('Warning: gene {} window starting at {} has genotype rows with differing sample lengths: {}'.format(gene, start, sorted(set(lengths))), file=sys.stderr)
+            # handle windows with no genotype data
+            if len(rows) == 0:
+                start += window
+                stop += window
+                if stop > M:
+                    stop = M
+                continue
+            # if lengths differ, keep only those with the most common length
+            if len(set(lengths)) > 1:
+                # pick the most common length
+                from collections import Counter
+                c = Counter(lengths)
+                common_len = c.most_common(1)[0][0]
+                filtered_rows = [r for r, l in zip(rows, lengths) if l == common_len]
+                rows = filtered_rows
+                lengths = [common_len] * len(rows)
+            # after filtering, if fewer than 1 row, skip
+            if len(rows) == 0:
+                start += window
+                stop += window
+                if stop > M:
+                    stop = M
+                continue
+            # if only a single variant remains in rows, this contributes 1 to m_eff (handled below), but warn
+            if len(rows) == 1:
+                # we'll handle single-variant windows below but log for diagnostics
+                pass
+            # stack into a 2D array (rows: SNPs, cols: samples)
+            try:
+                genotypes = np.vstack(rows)
+            except Exception:
+                # fallback: coerce to array and reshape conservatively
+                genotypes = np.asarray(rows)
+                if genotypes.ndim == 1:
+                    genotypes = genotypes.reshape((1, -1))
             # extracting the dimensions
             m, n = np.shape(genotypes)
+            # if after shaping there's only a single variant, treat as single-variant window
+            if m <= 1:
+                m_eff += 1
+                start += window
+                stop += window
+                if stop > M:
+                    stop = M
+                continue
             # Ledoit-Wolf shrinkage estimator, for estimating more stable covariance matrix,
             gen_corr, alpha = lw_shrink(genotypes) # regularized (shrinkage) covariance matrix and the shrinkage coefficient (alpha)
             # increase the number of windows we used
@@ -870,10 +1732,56 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
             # if the stop would be bigger than the number of variants left, just take until the end of the list of variants
             if stop > M:
                 stop = M
-        OUT.write(test_dict[gene]['line'] + '\t' + str(min(test_dict[gene]['pval'] * m_eff, 1)) + '\t' + str(m_eff) + '\n')
-        OUT.flush()
+        # count each missing variant as a single independent test
+        try:
+            m_eff += missing_variants
+        except Exception:
+            pass
+        # per-gene Bonferroni/eigen adjusted p-value
+        gene_p = min(test_dict[gene]['pval'] * m_eff, 1)
+        # write a compact JSON record for this gene to the temp file
+        try:
+            rec = {'line': test_dict[gene]['line'], 'orig_pval': float(test_dict[gene]['pval']), 'gene_p': float(gene_p), 'm_eff': float(m_eff)}
+        except Exception:
+            rec = {'line': str(test_dict[gene].get('line', '')), 'orig_pval': 1.0, 'gene_p': 1.0, 'm_eff': float(m_eff)}
+        tmpfh.write(json.dumps(rec) + '\n')
+        # free memory periodically
         gc.collect()
+    # after processing all genes, compute grand total tests by summing per-feature m_eff from the temp file
+    tmpfh.flush()
+    tmpfh.seek(0)
+    grand_total_tests = 0.0
+    try:
+        for l in tmpfh:
+            try:
+                obj = json.loads(l)
+                grand_total_tests += float(obj.get('m_eff', 0.0))
+            except Exception:
+                continue
+    finally:
+        tmpfh.close()
+    if grand_total_tests < 1:
+        grand_total_tests = 1
+    # write final output rows by reading the temporary file again
+    with open(tmp_name, 'r') as R:
+        for l in R:
+            try:
+                obj = json.loads(l)
+            except Exception:
+                continue
+            line = obj.get('line', '')
+            orig_pval = float(obj.get('orig_pval', 1.0))
+            gene_p = float(obj.get('gene_p', 1.0))
+            m_eff = int(obj.get('m_eff', 1))
+            grand_p = min(orig_pval * grand_total_tests, 1)
+            OUT.write(line + '\t' + str(gene_p) + '\t' + str(m_eff) + '\t' + str(grand_p) + '\t' + str(int(grand_total_tests)) + '\n')
+    OUT.flush()
     OUT.close()
+    # attempt to remove the temporary file
+    try:
+        os.unlink(tmp_name)
+    except Exception:
+        pass
 
 def lw_shrink(genotypes):
     """
@@ -903,9 +1811,22 @@ def lw_shrink(genotypes):
         # and the shrinkage covariance matrix
         shrunk_cov = fitted.covariance_
         # get the variances of the variants (diagonal of shrinkage cov mat), calculate inverse Square Root, then put that in a matrix representing
-        shrunk_precision = np.asmatrix(np.diag(np.diag(shrunk_cov)**(-.5)))
-        # use this to make it so that the resulting correlation matrix has unit variances along the diagonal, and scaled off-diagonal elements representing correlations
+        # sanitize diagonal variances to avoid divide-by-zero / infs
+        diag_vals = np.diag(shrunk_cov).astype(float)
+        # replace non-positive or zero variances with a small epsilon
+        eps = 1e-8
+        diag_vals_safe = np.where(np.isfinite(diag_vals) & (diag_vals > 0), diag_vals, eps)
+        inv_sqrt = diag_vals_safe ** (-0.5)
+        shrunk_precision = np.asmatrix(np.diag(inv_sqrt))
+        # use this to make it so that the resulting correlation matrix has unit variances along the diagonal,
+        # and scaled off-diagonal elements representing correlations
         shrunk_cor = shrunk_precision * shrunk_cov * shrunk_precision
+        # guard against any NaN/Inf introduced by numerical issues
+        if not np.isfinite(shrunk_cor).all():
+            # fallback to an identity-like correlation matrix if computation failed
+            m = shrunk_cor.shape[0]
+            shrunk_cor = np.asmatrix(np.identity(m))
+            alpha = 'NA'
     # if there is perfect LD
     except: #Exception for handling case where SNPs in the window are all in perfect LD
         # the covariances will just be 1, everywhere
@@ -934,20 +1855,27 @@ def find_num_eigs(eigenvalues, variance, var_thresh):
     Returns:
     int: The number of eigenvalues required to reach the specified variance threshold.
     """
-    # sort the eigenvalues in ascending order, then reverse to descending order
+    # make sure we have a numpy array of finite floats
+    eigenvalues = np.asarray(eigenvalues, dtype=float)
+    # sort in descending order
     eigenvalues = np.sort(eigenvalues)[::-1]
-    # keep track of the sum of eigenvalues
-    running_sum = 0
-    # keep track of the number of eigenvalues summed
-    counter = 0
-    # as long as the sum of eigenvalues is smaller than the variance times the variance threshold
-    while running_sum < variance * var_thresh:
-        # keep summing the eigenvalues
-        running_sum += eigenvalues[counter]
-        # and increasing the counter
-        counter += 1
-    # return the number of eigenvalues that was required to get to the threshold of variance explained
-    return counter
+    # sanitize: replace non-finite values with 0
+    eigenvalues[~np.isfinite(eigenvalues)] = 0.0
+    # total variance represented by eigenvalues
+    total = eigenvalues.sum()
+    target = float(variance) * float(var_thresh)
+    # if total is non-positive (degenerate case), return 1 as a conservative default
+    if total <= 0 or not np.isfinite(total):
+        return 1
+    # if the target is greater than or equal to total, all eigenvalues are required
+    if target >= total:
+        return int(eigenvalues.size)
+    # use cumulative sum and searchsorted to find how many eigenvalues are required
+    cumsum = np.cumsum(eigenvalues)
+    # searchsorted gives the first index where cumsum >= target
+    idx = np.searchsorted(cumsum, target, side='left')
+    # idx is 0-based; number of eigenvalues required is idx+1
+    return int(idx) + 1
 
 
 ##############MAIN##############
@@ -959,24 +1887,68 @@ if __name__=='__main__':
     """
 
     parser = argparse.ArgumentParser(description = USAGE)
-    parser.add_argument('--QTL', required = True, help = 'Matrix-EQTL output file for one chromosome')
-    parser.add_argument('--GEN', required = True, help = 'genotype matrix file')
+    parser.add_argument('--QTL', required = False, help = 'Matrix-EQTL output file with SNP-gene tests (can be gzipped)')
+    parser.add_argument('--TENSOR', required = False, help = 'tensorQTL output file with SNP-gene tests (can be gzipped)')
+    parser.add_argument('--LIMIX', required = False, help = 'LIMIX-QTL output file with SNP-gene tests (can be gzipped)')
+    parser.add_argument('--LIMIX_H5', required = False, help = 'LIMIX-QTL H5 chunk output file with SNP-gene tests')
+    parser.add_argument('--GEN', required = False, help = 'genotype matrix file in matrixEQTL format', default=None)
+    parser.add_argument('--PLINK1', required = False, help = 'genotype file prefix in plink1 binary format (bed/bim/fam, only supply the base path)', default=None)
+    parser.add_argument('--BGEN', required = False, help = 'genotype file prefix in bgen format (only supply the base path)', default=None)
     parser.add_argument('--var_thresh', type=float, default = 0.99, help = 'variance threshold')
     parser.add_argument('--OUT', required = True, help = 'output filename')
     parser.add_argument('--window', type=int, default = 200, help = 'SNP window size')
-    parser.add_argument('--GENPOS', required = True, help = 'map of genotype to chr and position (as required by Matrix-eQTL)')
-    parser.add_argument('--PHEPOS', required = True, help = 'map of measured phenotypes to chr and position (eg. gene expression to CHROM and TSS; as required by Matrix-eQTL)')
-    parser.add_argument('--CHROM', required = True, help = 'Chromosome that is being processed (must match format of chr in POS)')
+    parser.add_argument('--GENPOS', required = False, help = 'map of genotype to chr and position (as required by Matrix-eQTL)')
+    parser.add_argument('--PHEPOS', required = False, help = 'map of measured phenotypes to chr and position (eg. gene expression to CHROM and TSS; as required by Matrix-eQTL)')
+    parser.add_argument('--CHROM', required = False, help = 'Chromosome that is being processed (must match format of chr in POS)')
     parser.add_argument('--cis_dist', type=float, default = None, help = 'threshold for bp distance from the gene TSS to perform multiple testing correction, using no cis dist will consider all variants tested for a feature in the summary stats (default = None)')
     parser.add_argument('--external', action = 'store_true', help = 'indicates whether the provided genotype matrix is different from the one used to call cis-eQTLs initially (default = False)')
     parser.add_argument('--sample_list', default=None, help='File with sample IDs (one per line) to select from genotypes')
     parser.add_argument('--phenotype_groups', default=None, help='File with phenotype_id->group_id mapping')
+    parser.add_argument('--tmp_dir', default=None, help='Directory to create temporary files in (optional)')
     args = parser.parse_args()
 
+    # Determine which QTL input was supplied and extract the set of variants used
+    used_variants = []
+    # ensure genchrom_dict exists for optional chromosome-aware filtering
+    genchrom_dict = None
+    if args.QTL:
+        # Matrix-eQTL text format: variant is the first column
+        print('Extracting variants from Matrix-eQTL file...', flush=True)
+        used_variants = get_variants_from_qtl_file(args.QTL, variant_col=0, genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
+    elif args.TENSOR:
+        # tensorQTL parquet format: variants in 'variant_id'
+        print('Extracting variants from tensorQTL parquet file...', flush=True)
+        used_variants = get_variants_from_qtl_file(args.TENSOR, variant_col='variant_id', genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
+    elif args.LIMIX:
+        # LIMIX text format: uses 'snp_id' column
+        print('Extracting variants from LIMIX-QTL file...', flush=True)
+        used_variants = get_variants_from_qtl_file(args.LIMIX, variant_col='snp_id', genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
+    elif args.LIMIX_H5:
+        # LIMIX h5 chunked output; use helper to collect snp_id datasets across features
+        print('Extracting variants from LIMIX H5 file...', flush=True)
+        used_variants = get_variants_from_limix_h5(args.LIMIX_H5, genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
+
+    print('  * variants extracted:', len(used_variants), flush=True)
+
     
-    ##Make phenotype position dict
-    print('Processing phenotype position file.', flush=True)
-    phepos_dict = make_phepos_dict(args.PHEPOS, args.CHROM)
+    ##Make phenotype position dict (allow extraction from LIMIX input when PHEPOS not provided)
+    if args.PHEPOS:
+        print('Processing phenotype position file.', flush=True)
+        phepos_dict = make_phepos_dict(args.PHEPOS, args.CHROM)
+    else:
+        # try to extract phenotypes from LIMIX inputs when available
+        if args.LIMIX:
+            print('Extracting phenotype positions from LIMIX tests file.', flush=True)
+            phepos_dict = get_phepos_from_limix_file(args.LIMIX, args.CHROM)
+            if not phepos_dict:
+                print('Warning: could not extract phenotype positions from LIMIX text file; phepos_dict will be empty.', file=sys.stderr)
+        elif args.LIMIX_H5:
+            print('Extracting phenotype positions from LIMIX H5 file.', flush=True)
+            phepos_dict = get_phepos_from_limix_h5(args.LIMIX_H5, args.CHROM)
+            if not phepos_dict:
+                print('Warning: could not extract phenotype positions from LIMIX H5 file; phepos_dict will be empty.', file=sys.stderr)
+        else:
+            sys.exit('No phenotype positions file supplied and no LIMIX input to extract phenotypes from. Provide --PHEPOS or LIMIX/LIMIX_H5 input.')
 
     ### get sample list
     if args.sample_list is not None:
@@ -986,54 +1958,132 @@ if __name__=='__main__':
     else:
         sample_ids = None
 
-    ##Make SNP position dict
-    print('Processing genotype position file.', flush=True)
-    genpos_dict = make_genpos_dict(args.GENPOS, args.CHROM)
-    
-    # for matrixEQTL input/output we have a separate position file
-    if args.GEN.endswith('.bgen') is False:
-        ##Make genotype dict
-        print('Processing genotype matrix.', flush=True)
-        gen_dict = make_gen_dict(args.GEN, genpos_dict, sample_ids)
-    # for bgen we have both in the same file
-    else:
-        # read bgen file
-        print('Reading genotype data (bgen format)', flush=True)
-        bim,fam,bed,bgen = get_genotype_data_bgen(bgen_test_loc)
-        # and get the position and genotype data
-        print('Processing genotype data (bgen format)')
-        gen_dict = bgen_to_genotypes(bim, fam, bgen, args.CHROM, minimumProbabilityStep=0.1, genpos_dict)
-    
+    # Build genotype position and genotype dictionaries based on supplied inputs
+    genpos_dict = {}
+    gen_dict = {}
 
-    ##Make SNP-gene test dict
-    if not args.external:
-        # parquet format (such as tensorqtl)
-        if args.QTL.endswith('.parquet'):
-            print('Processing tensorQTL tests file.', flush=True)
-            if args.phenotype_groups is not None:
-                group_s = pd.read_csv(args.phenotype_groups, sep='\t', index_col=0, header=None, squeeze=True)
-                group_size_s = group_s.value_counts()
-            else:
-                group_size_s = None
-            test_dict, input_header = make_test_dict_tensorqtl(args.QTL, genpos_dict, args.cis_dist, group_size_s=group_size_s)
-        # full summary stats of LIMIX-QTL
-        elif args.QTL.endswith('qtl_results_all.txt.gz'):
-            print('Processing LIMIX-QTL tests summary file.', flush=True)
-            genpos_dict, phepos_dict, test_dict, input_header = make_test_dict_limix(args.QTL, genpos_dict, args.cis_dist)
-        # chunked summary stats of LIMIX-QTL
-        elif args.QTL.endswith('h5'):
-            print('Processing LIMIX-QTL tests h5 file.', flush=True)
-            test_dict, input_header = make_test_dict_limix_h5(args.QTL, genpos_dict, phepos_dict, args.cis_dist)
-        # matrixEQTL format
+    if args.GENPOS:
+        print('Processing genotype position file.', flush=True)
+        genpos_dict = make_genpos_dict(args.GENPOS, args.CHROM)
+        # also build a mapping variant -> chromosome for filtering QTLs by CHROM
+        genchrom_dict = {}
+        with open_file(args.GENPOS) as POS:
+            POS.readline()
+            for line in POS:
+                parts = line.rstrip().split()
+                if len(parts) >= 2:
+                    genchrom_dict[parts[0]] = parts[1]
+
+    # Load genotype matrix if provided (Matrix-eQTL format)
+    if args.GEN and (not args.GEN.endswith('.bgen')):
+        print('Processing genotype matrix (Matrix-eQTL format).', flush=True)
+        if not genpos_dict:
+            print('Warning: GENPOS not supplied; genpos_dict will be empty.', file=sys.stderr)
+        gen_dict = make_gen_dict_matrixqtl(args.GEN, genpos_dict, sample_ids)
+    elif args.BGEN:
+        print('Reading BGEN genotype data...', flush=True)
+        try:
+            bim, fam, bed, bgen = get_genotype_data_bgen(args.BGEN)
+            gen_dict = bgen_to_genotypes(bim, fam, bgen, args.CHROM, minimumProbabilityStep=0.1, genpos_dict=genpos_dict)
+        except Exception as e:
+            print('Warning: could not read/process BGEN file; genotypes will not be loaded: ' + str(e), file=sys.stderr)
+            gen_dict = {}
+    elif args.PLINK1:
+        print('Reading PLINK1 genotype data...', flush=True)
+        try:
+            bim, fam = get_genotype_data_plink1(args.PLINK1)
+            # if no GENPOS supplied, populate genpos_dict from BIM so we can map variant ids -> positions
+            if not genpos_dict:
+                try:
+                    genpos_dict = {str(r['snp']): int(r['pos']) for _, r in bim.iterrows()}
+                except Exception:
+                    # ensure at least string positions
+                    genpos_dict = {str(r['snp']): r['pos'] for _, r in bim.iterrows()}
+                # also create genchrom_dict for chromosome-aware filtering
+                try:
+                    genchrom_dict = {str(r['snp']): str(r['chrom']).replace('chr', '') for _, r in bim.iterrows()}
+                except Exception:
+                    genchrom_dict = None
+            gen_dict = plink_to_genotypes(bim, fam, args.PLINK1 + '.bed', args.CHROM, sample_ids=sample_ids, genpos_dict=genpos_dict)
+        except Exception as e:
+            print('Warning: could not read/process PLINK1 files; genotypes will not be loaded: ' + str(e), file=sys.stderr)
+            gen_dict = {}
+
+    # Diagnostic: report how many used_variants map into genotype data (helps debug key mismatches)
+    # if used_variants:
+    #     total_used = len(used_variants)
+    #     present_variant_key = sum(1 for v in used_variants if v in gen_dict)
+    #     present_via_genpos = 0
+    #     present_via_genpos_int = 0
+    #     for v in used_variants:
+    #         gp = genpos_dict.get(v)
+    #         if gp is not None:
+    #             # direct match
+    #             if gp in gen_dict:
+    #                 present_via_genpos += 1
+    #             # integer position match
+    #             try:
+    #                 gi = int(gp)
+    #                 if gi in gen_dict:
+    #                     present_via_genpos_int += 1
+    #             except Exception:
+    #                 pass
+    #     print(f"Variant mapping diagnostic: used_variants={total_used}, present_by_variant_key={present_variant_key}, present_by_genpos={present_via_genpos}, present_by_genpos_int={present_via_genpos_int}", flush=True)
+    #     # show a few examples of mismatches
+    #     mismatches = []
+    #     for v in used_variants[:50]:
+    #         gp = genpos_dict.get(v)
+    #         in_gen = v in gen_dict
+    #         in_pos = gp in gen_dict if gp is not None else False
+    #         try:
+    #             in_pos_int = int(gp) in gen_dict if gp is not None else False
+    #         except Exception:
+    #             in_pos_int = False
+    #         if not (in_gen or in_pos or in_pos_int):
+    #             mismatches.append((v, gp, in_gen, in_pos, in_pos_int))
+    #         if len(mismatches) >= 10:
+    #             break
+    #     if mismatches:
+    #         print('Sample mismatches (variant, genpos, in_genkey, in_genpos, in_genpos_int):', flush=True)
+    #         for x in mismatches:
+    #             print('\t' + '\t'.join([str(i) for i in x]), flush=True)
+    #     # show a few genotype keys to inspect types
+    #     try:
+    #         sample_keys = list(gen_dict.keys())[:10]
+    #         print('Sample genotype keys (first 10):', sample_keys, flush=True)
+    #     except Exception:
+    #         pass
+
+    # Make the test_dict and input_header based on the QTL input type
+    test_dict = {}
+    input_header = ''
+
+    # phenotype groups for tensorQTL grouping
+    if args.phenotype_groups is not None:
+        try:
+            group_s = pd.read_csv(args.phenotype_groups, sep='\t', index_col=0, header=None, squeeze=True)
+            group_size_s = group_s.value_counts()
+        except Exception:
+            group_size_s = None
+    else:
+        group_size_s = None
+
+    if args.TENSOR:
+        print('Processing tensorQTL tests file.', flush=True)
+        test_dict, input_header = make_test_dict_tensorqtl(args.TENSOR, genpos_dict, args.cis_dist, group_size_s=group_size_s, genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
+    elif args.LIMIX:
+        print('Processing LIMIX-QTL tests summary file.', flush=True)
+        genpos_dict, phepos_dict, test_dict, input_header = make_test_dict_limix(args.LIMIX, args.cis_dist, genchrom_dict if 'genchrom_dict' in locals() else None, args.CHROM)
+    elif args.LIMIX_H5:
+        print('Processing LIMIX-QTL tests h5 file.', flush=True)
+        test_dict, input_header = make_test_dict_limix_h5(args.LIMIX_H5, genpos_dict, phepos_dict, args.cis_dist, genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
+    elif args.QTL:
+        print('Processing Matrix-eQTL tests file.', flush=True)
+        if args.external:
+            test_dict, input_header = make_test_dict_external(args.QTL, gen_dict, genpos_dict, phepos_dict, args.cis_dist, genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
         else:
-            print('Processing Matrix-eQTL tests file.', flush=True)
-            test_dict, input_header = make_test_dict(args.QTL, gen_dict, genpos_dict, phepos_dict, args.cis_dist)
-    # matrixEQTL format with different genotype data
-    else:
-        print('Processing Matrix-eQTL tests file. External genotype matrix and position file assumed.', flush=True)
-        test_dict, input_header = make_test_dict_external(args.QTL, gen_dict, genpos_dict, phepos_dict, args.cis_dist)
-
+            test_dict, input_header = make_test_dict_matrixqtl(args.QTL, gen_dict, genpos_dict, phepos_dict, args.cis_dist, genchrom_dict=genchrom_dict if 'genchrom_dict' in locals() else None, CHROM=args.CHROM)
 
     ##Perform BF correction using eigenvalue decomposition of the correlation matrix
     print('Performing eigenMT correction.', flush=True)
-    bf_eigen_windows(test_dict, gen_dict, phepos_dict, args.OUT, input_header, args.var_thresh, args.window)
+    bf_eigen_windows(test_dict, gen_dict, phepos_dict, args.OUT, input_header, args.var_thresh, args.window, tmp_dir=args.tmp_dir)
