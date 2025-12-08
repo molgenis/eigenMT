@@ -1596,7 +1596,7 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
         # quick diagnostics: how many of the listed snps have genotype data (prefer rsid matches)
         try:
             n_listed = len(snps)
-            n_present = 0
+            n_present_position = 0
             n_present_rsid = 0
             for s in snps:
                 found = False
@@ -1618,22 +1618,22 @@ def bf_eigen_windows(test_dict, gen_dict, phepos_dict, OUT_fh, input_header, var
                     elif si is not None and si in gen_dict:
                         found = True
                 if found:
-                    n_present += 1
+                    n_present_position += 1
         except Exception:
             n_listed = 0
-            n_present = 0
+            n_present_position = 0
             n_present_rsid = 0
+        # get how many we eventually found
+        n_present = n_present_position + n_present_rsid
         if n_present == 0:
-            print('Warning: gene {} has {} listed snps but 0 present in genotypes; TESTS will be 0'.format(gene, n_listed), file=sys.stderr)
+            print('Warning: gene {} has {} listed snps but 0 present in genotypes; TESTS will be equal to total snp number'.format(gene, n_listed), file=sys.stderr)
         else:
             try:
                 # if n_present_rsid > 0:
                 #     print(f'Note: gene {gene} matched {n_present_rsid} variants by rsid and {n_present - n_present_rsid} by position', flush=True)
-                # calculate how many variants could not be matched by rsid
-                n_by_position = n_present - n_present_rsid
-                # warn about this
-                if n_by_position > 0:
-                    print(f'Warning: gene {gene} has {n_by_position} variant(s) matched only by position; ensure these are correct.', file=sys.stderr)
+                # warn about variants that were only found by position
+                if n_present_position > 0:
+                    print(f'Warning: gene {gene} has {n_present_position} variant(s) matched only by position; ensure these are correct.', file=sys.stderr)
             except Exception:
                 pass
         # compute how many listed variants are missing from genotypes
